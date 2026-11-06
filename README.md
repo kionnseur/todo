@@ -127,3 +127,12 @@ Traefik Docker → todo (Rust / Axum)
 Un clic sur le titre ou le chevron déplie simultanément la description et les enfants. Le repli cache les deux, sans supprimer de données. Les actions Modifier, Monter, Descendre et Supprimer se trouvent dans le menu « ⋯ ».
 
 Pour déployer cette version depuis le dossier du projet sur le VPS : `docker compose up -d --build`. Les données restent dans le volume Docker existant.
+
+## Releases GitHub
+
+Créer et pousser un tag `vX.Y.Z` déclenche automatiquement la compilation des binaires Linux x86_64, Windows x86_64, macOS Apple Silicon et macOS Intel, puis crée une Release GitHub avec les archives et leurs sommes SHA-256 :
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
+```
