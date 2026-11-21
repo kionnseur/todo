@@ -32,6 +32,18 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=8m
+    develop:
+      watch:
+        - action: rebuild
+          path: ./src
+        - action: rebuild
+          path: ./static
+        - action: rebuild
+          path: Cargo.toml
+        - action: rebuild
+          path: Cargo.lock
+        - action: rebuild
+          path: Dockerfile
 
   mock-oidc:
     image: ghcr.io/navikt/mock-oauth2-server:6.1.1

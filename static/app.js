@@ -1,141 +1,32 @@
-(() => {
-  const root = document.getElementById('tree');
-  if (!root) return;
-  const modal = document.getElementById('modal');
-  const form = document.getElementById('task-form');
-  const expanded = new Set();
-  let menuOpenId = null;
-  let tasks = [];
-  const escape = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const csrfFetch = async (url, options={}) => {
-    const response = await fetch(url, {credentials:'same-origin', headers:{'Content-Type':'application/json','X-Todo-Request':'1', ...(options.headers||{})}, ...options});
-    if(response.status === 401){window.location.href='/auth/login'; throw new Error('Session expirée');}
-    if(!response.ok){const data=await response.json().catch(()=>({}));throw new Error(data.error||'Une erreur est survenue');}
-    if(response.status === 204)return null;
-    return response.json();
-  };
-  let toastTimer;
-  const notify = txt => {let t=document.querySelector('.toast'); if(!t){t=document.createElement('div');t.className='toast';document.body.append(t);}t.textContent=txt;clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.remove(),3500);};
-  function render(){
-    const byParent = new Map();
-    for(const t of tasks){ const p=t.parent_id??'';if(!byParent.has(p))byParent.set(p,[]);byParent.get(p).push(t);}
-    const renderLevel=(parent,depth=0)=> (byParent.get(parent)||[]).map(t=>{
-      const open=expanded.has(t.id), done=!!t.completed_at;
-      const menuOpen=menuOpenId===t.id;
-      return `<div class="task ${open?'open':''} ${done?'done':''} ${menuOpen?'menu-open':''}" data-id="${escape(t.id)}">
-        <div class="task-row" draggable="true" data-drag-id="${escape(t.id)}"><input class="check" type="checkbox" data-act="check" aria-label="Valider ${escape(t.title)}" ${done?'checked':''}>
-        <button class="task-name" data-act="expand" aria-expanded="${open}" aria-label="${open?'Replier':'Déplier'} ${escape(t.title)}">${escape(t.title)}</button>
-        <button class="iconbtn" data-act="add-child" title="Ajouter une sous-tâche" aria-label="Ajouter une sous-tâche à ${escape(t.title)}">+</button>
-        <div class="menu-wrap">
-          <button class="iconbtn menu-toggle" data-act="menu" aria-haspopup="true" aria-expanded="${menuOpen}" aria-label="Actions pour ${escape(t.title)}" title="Actions">⋯</button>
-          ${menuOpen?`<div class="task-menu" role="group" aria-label="Actions pour ${escape(t.title)}">
-            <button data-act="edit">Modifier</button>
-            <button data-act="up">↑ Monter</button>
-            <button data-act="down">↓ Descendre</button>
-            <button class="danger" data-act="delete">Supprimer</button>
-          </div>`:''}
-        </div>
-        <button class="iconbtn expand-toggle" data-act="expand" aria-label="${open?'Masquer':'Afficher'} les détails et sous-tâches de ${escape(t.title)}" aria-expanded="${open}"><span class="twisty">▶</span></button></div>
-        ${open?`<div class="details"><div class="desc ${t.description?'':'none'}">${escape(t.description||'Aucune description')}</div></div>
-        ${depth<30?`<div class="children">${renderLevel(t.id,depth+1)}</div>`:''}`:''}</div>`;
-    }).join('');
-    root.innerHTML=renderLevel('') || '<div class="empty"><div class="big">☑</div>Aucune tâche pour le moment.<br>Ajoutez votre première tâche.</div>';
-    document.getElementById('count').textContent=`${tasks.filter(t=>!t.completed_at).length} en cours`;
-  }
-  async function refresh(){tasks=await csrfFetch('/api/tasks');render();}
-  function showForm(t=null,parentId=null){
-    form.reset();form.elements.id.value=t?.id||'';form.elements.parent_id.value=parentId||t?.parent_id||'';
-    form.elements.title.value=t?.title||'';form.elements.description.value=t?.description||'';
-    document.getElementById('modal-title').textContent=t?'Modifier la tâche':parentId?'Nouvelle sous-tâche':'Nouvelle tâche';
-    modal.classList.remove('hidden');form.elements.title.focus();
-  }
-  document.getElementById('new-task').addEventListener('click',()=>showForm());
-  document.getElementById('cancel').addEventListener('click',()=>modal.classList.add('hidden'));
-  modal.addEventListener('click',e=>{if(e.target===modal)modal.classList.add('hidden');});
-  document.addEventListener('keydown',e=>{if(e.key==='Escape'){modal.classList.add('hidden');if(menuOpenId!==null){menuOpenId=null;render();}}});
-  form.addEventListener('submit',async e=>{
-    e.preventDefault(); const id=form.elements.id.value;
-    const data={title:form.elements.title.value.trim(),description:form.elements.description.value.trim(),parent_id:form.elements.parent_id.value||null};
-    if(!data.title)return;
-    try{await csrfFetch(id?`/api/tasks/${encodeURIComponent(id)}`:'/api/tasks',{method:id?'PATCH':'POST',body:JSON.stringify(data)});modal.classList.add('hidden');await refresh();}
-    catch(err){notify(err.message);}
-  });
-  root.addEventListener('click',async e=>{
-    const target=e.target.closest('[data-act]');if(!target||target.dataset.act==='check')return;
-    const node=target.closest('.task');if(!node)return;
-    const id=node.dataset.id, task=tasks.find(t=>t.id===id);if(!task)return;
-    const act=target.dataset.act;
-    if(act==='menu'){menuOpenId=menuOpenId===id?null:id;render();return;}
-    menuOpenId=null;
-    if(act==='expand'){expanded.has(id)?expanded.delete(id):expanded.add(id);render();return;}
-    if(act==='add-child'){expanded.add(id);render();showForm(null,id);return;}
-    if(act==='edit'){render();showForm(task);return;}
-    if(act==='delete'&&!confirm('Supprimer cette tâche et toutes ses sous-tâches ?')){render();return;}
-    try{
-      if(act==='delete')await csrfFetch(`/api/tasks/${encodeURIComponent(id)}`,{method:'DELETE'});
-      if(act==='up'||act==='down')await csrfFetch(`/api/tasks/${encodeURIComponent(id)}/move`,{method:'POST',body:JSON.stringify({direction:act})});
-      await refresh();
-    }catch(err){notify(err.message);}
-  });
-  document.addEventListener('click',e=>{
-    if(menuOpenId!==null && !e.target.closest('.menu-wrap')){menuOpenId=null;render();}
-  });
-  root.addEventListener('change',async e=>{
-    if(!e.target.matches('[data-act="check"]'))return;
-    const id=e.target.closest('.task').dataset.id;
-    try{await csrfFetch(`/api/tasks/${encodeURIComponent(id)}/check`,{method:'POST',body:JSON.stringify({done:e.target.checked})});await refresh();}
-    catch(err){notify(err.message);await refresh();}
-  });
-  root.addEventListener('dragstart',e=>{
-    const row=e.target.closest('.task-row');
-    if(!row)return;
-    const task=row.closest('.task');
-    if(!task)return;
-    e.dataTransfer.effectAllowed='move';
-    e.dataTransfer.setData('text/plain',task.dataset.id);
-    task.classList.add('dragging');
-  });
-  root.addEventListener('dragend',e=>{
-    const task=e.target.closest('.task');
-    if(task)task.classList.remove('dragging');
-    root.querySelectorAll('.drag-over').forEach(el=>el.classList.remove('drag-over'));
-  });
-  root.addEventListener('dragover',e=>{
-    const row=e.target.closest('.task-row');
-    if(!row)return;
-    const target=row.closest('.task');
-    const dragged=tasks.find(t=>t.id===e.dataTransfer.getData('text/plain'));
-    const targetTask=tasks.find(t=>t.id===target?.dataset.id);
-    if(!dragged||!targetTask||dragged.id===targetTask.id||dragged.parent_id!==targetTask.parent_id)return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect='move';
-    root.querySelectorAll('.drag-over').forEach(el=>el.classList.remove('drag-over'));
-    row.classList.add('drag-over');
-  });
-  root.addEventListener('dragleave',e=>{
-    const row=e.target.closest('.task-row');
-    if(row&&!row.contains(e.relatedTarget))row.classList.remove('drag-over');
-  });
-  root.addEventListener('drop',async e=>{
-    const row=e.target.closest('.task-row');
-    if(!row)return;
-    e.preventDefault();
-    const targetId=row.closest('.task')?.dataset.id;
-    const draggedId=e.dataTransfer.getData('text/plain');
-    const dragged=tasks.find(t=>t.id===draggedId);
-    const target=tasks.find(t=>t.id===targetId);
-    if(!dragged||!target||draggedId===targetId||dragged.parent_id!==target.parent_id)return;
-    const siblings=tasks.filter(t=>t.parent_id===dragged.parent_id);
-    const from=siblings.findIndex(t=>t.id===draggedId), to=siblings.findIndex(t=>t.id===targetId);
-    if(from<0||to<0||from===to)return;
-    try{
-      const direction=from<to?'down':'up';
-      for(let i=0;i<Math.abs(to-from);i++){
-        await csrfFetch(`/api/tasks/${encodeURIComponent(draggedId)}/move`,{method:'POST',body:JSON.stringify({direction})});
-      }
-      await refresh();
-    }catch(err){notify(err.message);await refresh();}
-    root.querySelectorAll('.drag-over').forEach(el=>el.classList.remove('drag-over'));
-  });
-  refresh().catch(err=>notify(err.message));
+﻿(()=>{
+const root=document.getElementById('tree'); if(!root)return;
+const panel=root.closest('.panel'), heading=panel.querySelector('.heading'), modal=document.getElementById('modal'), form=document.getElementById('task-form');
+let tasks=[],sort='custom',editingOrder=false,selected=null,menuId=null,carouselPath=[],carouselLevel=0,timer;
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const api=async(u,o={})=>{const r=await fetch(u,{credentials:'same-origin',headers:{'Content-Type':'application/json','X-Todo-Request':'1'},...o});if(r.status===401){location.href='/auth/login';throw Error('Session expirée')}if(!r.ok){const d=await r.json().catch(()=>({}));throw Error(d.error||'Une erreur est survenue')}return r.status===204?null:r.json()};
+function notify(message){let t=document.querySelector('.toast');if(!t){t=document.createElement('div');t.className='toast';document.body.append(t)}t.textContent=message;clearTimeout(timer);timer=setTimeout(()=>t.remove(),3500)}
+function colorIndex(s){let m={};try{m=JSON.parse(localStorage.todoCategoryColors||'{}')}catch{}if(!Number.isInteger(m[s])){m[s]=Math.floor(Math.random()*10)+1;try{localStorage.todoCategoryColors=JSON.stringify(m)}catch{}}return m[s]}
+const controls=document.createElement('div');controls.className='heading-actions';controls.innerHTML='<button type="button" class="view-action" id="edit-order" aria-label="Modifier l’ordre" aria-pressed="false" title="Afficher les numéros de position">✎</button><button type="button" class="view-action" id="group-category" aria-label="Regrouper par catégorie" aria-pressed="false" title="Regrouper par catégorie">☷</button>';heading.insertBefore(controls,document.getElementById('new-task'));controls.append(document.getElementById('new-task'));
+const fields=document.createElement('div');fields.className='form-grid';fields.innerHTML='<label class="field">Catégorie <input class="fieldinput" name="category" maxlength="40" placeholder="Ex. Maison"></label><label class="field">Position <input class="fieldinput" name="position" type="number" min="0" placeholder="Auto"></label>';form.querySelector('.modal-actions').before(fields);const recurrence=document.createElement('label');recurrence.className='field';recurrence.innerHTML='Récurrence <select class="fieldinput" name="recurrence"><option value="none">Aucune</option><option value="daily">Chaque jour</option><option value="weekly">Chaque semaine</option><option value="monthly">Chaque mois</option><option value="quarterly">Chaque trimestre</option><option value="yearly">Chaque année</option></select>';form.querySelector('.modal-actions').before(recurrence);
+function ordered(list){return [...list].sort((a,b)=>sort==='category'?a.category.localeCompare(b.category)||a.sort_order-b.sort_order:a.sort_order-b.sort_order)}
+function grouped(list,renderItem){let previous;return ordered(list).map(t=>{const label=sort==='category'&&t.category!==previous?`<div class="category-heading">${esc(t.category||'Sans catégorie')}</div>`:'';previous=t.category;return label+renderItem(t)}).join('')}
+function recurrenceIcon(value){const periods={daily:['J','Chaque jour'],weekly:['S','Chaque semaine'],monthly:['M','Chaque mois'],quarterly:['T','Chaque trimestre'],yearly:['A','Chaque année']},period=periods[value];return period?`<span class="recurrence-icon" role="img" aria-label="${period[1]}" title="${period[1]}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8a8 8 0 0 0-13-2L4 8m0 0V4m0 4h4M5 16a8 8 0 0 0 13 2l2-2m0 0v4m0-4h-4"/></svg><span>${period[0]}</span></span>`:''}
+function row(t){const has=tasks.some(x=>x.parent_id===t.id);return `<div class="task-row" draggable="${sort==='custom'}">${editingOrder?`<div class="position-control"><input class="position-input" data-act="position" type="number" min="0" value="${t.sort_order}" aria-label="Position de ${esc(t.title)}"><div class="position-buttons"><button type="button" data-act="position-minus" aria-label="Diminuer la position de ${esc(t.title)}">▲</button><button type="button" data-act="position-plus" aria-label="Augmenter la position de ${esc(t.title)}">▼</button></div></div>`:''}<input class="check" type="checkbox" data-act="check" aria-label="Terminer ${esc(t.title)}" ${t.completed_at?'checked':''}>${t.category?`<span class="category-dot category-color-${colorIndex(t.category)}"></span>`:'<span class="category-dot category-empty"></span>'}<button class="task-name" data-act="expand">${esc(t.title)}${t.category?`<small class="category-label">${esc(t.category)}</small>`:''}</button>${recurrenceIcon(t.recurrence)}<button class="iconbtn" data-act="add-child" aria-label="Ajouter une sous-tâche">+</button><div class="menu-wrap"><button class="iconbtn menu-toggle" data-act="menu" aria-label="Actions">⋯</button>${menuId===t.id?'<div class="task-menu"><button data-act="edit">Modifier</button><button data-act="up">↑ Monter</button><button data-act="down">↓ Descendre</button><button data-act="delete" class="danger">Supprimer</button></div>':''}</div>${has?`<button class="iconbtn expand-toggle ${selected===t.id?'points-right':''}" data-act="expand" aria-label="Afficher les détails"><span class="twisty">▲</span></button>`:'<span class="arrow-spacer" aria-hidden="true"></span>'}</div>`}
+function desc(t){return `<p class="desc ${t?.description?'':'none'}">${esc(t?.description||'Aucune description')}</p>`}
+function dots(count,active){return `<nav class="page-dots" aria-label="Navigation des pages">${Array.from({length:count},(_,i)=>`<button type="button" data-page-dot="${i}" aria-label="Page ${i+1}" ${i===active?'aria-current="page"':''}></button>`).join('')}</nav>`}
+function render(){document.getElementById('count').textContent=`${tasks.filter(t=>!t.completed_at).length} en cours`;document.getElementById('edit-order').setAttribute('aria-pressed',String(editingOrder));document.getElementById('group-category').setAttribute('aria-pressed',String(sort==='category'));const list=tasks;heading.remove();root.className='tree mode-3';
+{const oldTrack=root.querySelector('.levels-track');if(oldTrack){const center=oldTrack.getBoundingClientRect().left+oldTrack.clientWidth/2;let distance=Infinity;[...oldTrack.children].forEach((page,i)=>{const rect=page.getBoundingClientRect(),d=Math.abs(rect.left+rect.width/2-center);if(d<distance){distance=d;carouselLevel=i}})}carouselPath=carouselPath.filter((id,i)=>list.some(t=>t.id===id&&t.parent_id===(i?carouselPath[i-1]:null)));const pages=[null,...carouselPath];carouselLevel=Math.min(carouselLevel,pages.length-1);root.innerHTML=`<div class="levels-track">${pages.map((id,i)=>{const parent=tasks.find(t=>t.id===id);return `<section class="level-page" data-level="${i}">${parent?`<div class="carousel-page-title">${esc(parent.title)}</div>`:''}${grouped(list.filter(t=>t.parent_id===id),t=>`<div class="task ${t.completed_at?'done':''} ${selected===t.id?'open':''}" data-id="${esc(t.id)}">${row(t)}${selected===t.id?`<div class="details-description">${desc(t)}</div>`:''}</div>`)||'<p class="desc none">Aucune tâche dans cette liste.</p>'}</section>`}).join('')}</div>${pages.length>1?dots(pages.length,carouselLevel):''}`;requestAnimationFrame(()=>{const track=root.querySelector('.levels-track'),page=track?.children[carouselLevel];if(track&&page){const trackRect=track.getBoundingClientRect(),pageRect=page.getBoundingClientRect();track.scrollLeft+=pageRect.left+pageRect.width/2-(trackRect.left+track.clientWidth/2)}})}
+root.querySelector('.level-page')?.prepend(heading);
+}
+async function refresh(){tasks=await api('/api/tasks');render()}
+function showForm(t=null,p=null){form.reset();form.elements.title.setCustomValidity('');form.elements.id.value=t?.id||'';form.elements.parent_id.value=p||t?.parent_id||'';form.elements.title.value=t?.title||'';form.elements.description.value=t?.description||'';form.elements.category.value=t?.category||'';form.elements.position.value=t?Math.max(0,t.sort_order):'';form.elements.recurrence.value=t?.recurrence||'none';document.getElementById('modal-title').textContent=t?'Modifier la tâche':p?'Nouvelle sous-tâche':'Nouvelle tâche';modal.classList.remove('hidden');form.elements.title.focus()}
+document.getElementById('new-task').onclick=()=>showForm();document.getElementById('cancel').onclick=()=>modal.classList.add('hidden');modal.onclick=e=>{if(e.target===modal)modal.classList.add('hidden')};document.addEventListener('keydown',e=>{if(e.key==='Escape'){modal.classList.add('hidden');menuId=null;render()}});
+form.onsubmit=async e=>{e.preventDefault();const id=form.elements.id.value,d={title:form.elements.title.value.trim(),description:form.elements.description.value.trim(),parent_id:form.elements.parent_id.value||null,category:form.elements.category.value.trim(),recurrence:form.elements.recurrence.value,position:form.elements.position.value===''?null:Math.max(0,Number(form.elements.position.value))};if(!d.title){form.elements.title.setCustomValidity('Saisis un titre contenant au moins un caractère.');form.elements.title.reportValidity();return}form.elements.title.setCustomValidity('');try{await api(id?`/api/tasks/${id}`:'/api/tasks',{method:id?'PATCH':'POST',body:JSON.stringify(d)});modal.classList.add('hidden');await refresh()}catch(x){notify(x.message)}};
+form.elements.title.addEventListener('input',()=>form.elements.title.setCustomValidity(''));
+root.onclick=async e=>{const dot=e.target.closest('[data-page-dot]');if(dot){const track=root.querySelector('.levels-track'),page=track?.children[Number(dot.dataset.pageDot)];if(track&&page){const a=track.getBoundingClientRect(),b=page.getBoundingClientRect();track.scrollBy({left:b.left+b.width/2-(a.left+track.clientWidth/2),behavior:'smooth'})}return}const a=e.target.closest('[data-act]');if(!a||a.matches('input'))return;const node=a.closest('.task'),id=node?.dataset.id,t=tasks.find(x=>x.id===id);if(!t)return;const act=a.dataset.act;if(act==='position-minus'||act==='position-plus'){const input=node.querySelector('[data-act=position]');input.value=Math.max(0,(Number(input.value)||0)+(act==='position-minus'?-1:1));input.defaultValue=input.value;input.dispatchEvent(new Event('change',{bubbles:true}));return}if(act==='menu'){menuId=menuId===id?null:id;render();return}menuId=null;if(act==='expand'){const closing=selected===id;selected=closing?null:id;const level=Number(node.closest('[data-level]').dataset.level);carouselPath=carouselPath.slice(0,level);if(!closing&&tasks.some(x=>x.parent_id===id))carouselPath.push(id);render();return}if(act==='add-child'){showForm(null,id);return}if(act==='edit'){showForm(t);return}if(act==='delete'&&!confirm('Supprimer cette tâche et ses sous-tâches ?')){render();return}try{if(act==='delete')await api(`/api/tasks/${id}`,{method:'DELETE'});if(act==='up'||act==='down')await api(`/api/tasks/${id}/move`,{method:'POST',body:JSON.stringify({direction:act})});await refresh()}catch(x){notify(x.message)}};
+root.addEventListener('scroll',e=>{const track=e.target;if(!track.matches('.levels-track,.inspector-layout'))return;const center=track.getBoundingClientRect().left+track.clientWidth/2;let index=0,distance=Infinity;[...track.children].forEach((page,i)=>{const r=page.getBoundingClientRect(),d=Math.abs(r.left+r.width/2-center);if(d<distance){index=i;distance=d}});root.querySelectorAll('[data-page-dot]').forEach((dot,i)=>{if(i===index)dot.setAttribute('aria-current','page');else dot.removeAttribute('aria-current')})},true);
+root.onchange=async e=>{const act=e.target.dataset.act,id=e.target.closest('.task')?.dataset.id;if(!id)return;try{if(act==='check')await api(`/api/tasks/${id}/check`,{method:'POST',body:JSON.stringify({done:e.target.checked})});else if(act==='position')await api(`/api/tasks/${id}/position`,{method:'POST',body:JSON.stringify({position:Math.max(0,Number(e.target.value)||0)})});else return;await refresh()}catch(x){notify(x.message);render()}};
+controls.addEventListener('click',e=>{if(e.target.closest('#edit-order'))editingOrder=!editingOrder;else if(e.target.closest('#group-category'))sort=sort==='category'?'custom':'category';else return;menuId=null;render()});
+root.ondragstart=e=>{const n=e.target.closest('.task');if(n)e.dataTransfer.setData('text/plain',n.dataset.id)};root.ondragover=e=>{if(e.target.closest('.task-row'))e.preventDefault()};root.ondrop=async e=>{e.preventDefault();if(sort!=='custom')return;const id=e.target.closest('.task')?.dataset.id,drag=e.dataTransfer.getData('text/plain'),a=tasks.find(t=>t.id===drag),b=tasks.find(t=>t.id===id);if(!a||!b||a.parent_id!==b.parent_id||a.id===b.id)return;const siblings=tasks.filter(t=>t.parent_id===a.parent_id).sort((x,y)=>x.sort_order-y.sort_order);try{await api(`/api/tasks/${drag}/position`,{method:'POST',body:JSON.stringify({position:siblings.findIndex(t=>t.id===b.id)})});await refresh()}catch(x){notify(x.message)}};
+refresh().catch(x=>notify(x.message));
 })();

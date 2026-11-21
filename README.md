@@ -4,6 +4,8 @@ Application de tâches personnelle, sans framework frontend, adaptée à 4–5 u
 
 ## Fonctionnalités
 
+Les tâches récurrentes et leurs descendants sont conservés. Cocher une tâche récurrente ne coche pas ses enfants ; à la fin de sa période, elle et tous ses descendants sont décochés. La période commence au moment où la tâche récurrente est cochée : 24 heures, 7 jours, 30 jours, 90 jours ou 365 jours selon la récurrence. Un parent contenant une tâche récurrente est aussi conservé pour éviter sa suppression en cascade.
+
 - Authentification OIDC via Pocket ID : Authorization Code + PKCE S256, `state` + cookie de navigateur, `nonce`, ID Token signé vérifié avec JWKS et contrôle issuer/audience/expiration.
 - Sessions de 7 jours, jetons de session opaques, hachés dans SQLite, cookies `HttpOnly; Secure; SameSite=Lax`.
 - Un espace **privé par compte Pocket ID** (`sub`), sans partage des listes entre utilisateurs.

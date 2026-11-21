@@ -29,9 +29,9 @@ struct AuthFlow { verifier: String, nonce: String, browser_hash: String }
 #[derive(Debug, FromRow)]
 struct User { sub: String, name: String }
 #[derive(Debug, Serialize, FromRow)]
-struct Task { id: String, parent_id: Option<String>, title: String, description: String, sort_order: i64, completed_at: Option<i64>, created_at: i64 }
+struct Task { id: String, parent_id: Option<String>, title: String, description: String, category: String, category_color: String, recurrence: String, sort_order: i64, completed_at: Option<i64>, next_reset_at: Option<i64>, created_at: i64 }
 #[derive(Debug, Deserialize)]
-struct TaskInput { title: String, #[serde(default)] description: String, #[serde(default)] parent_id: Option<String> }
+struct TaskInput { title: String, #[serde(default)] description: String, #[serde(default)] parent_id: Option<String>, #[serde(default)] category: String, #[serde(default)] category_color: String, #[serde(default)] recurrence: String, #[serde(default)] position: Option<i64> }
 #[derive(Debug, Deserialize)]
 struct CheckInput { done: bool }
 #[derive(Debug, Deserialize)]
@@ -81,7 +81,7 @@ async fn index(State(s):State<Arc<AppState>>,headers:HeaderMap)->Response {
     let Some(user)=current_user(&s,&headers).await else {
         return add_security_headers(shell("<main class=\"wrap\"><section class=\"panel login\"><div class=\"logo\" style=\"margin:auto\">✓</div><h1>Mes tâches</h1><p>Une liste simple, privée, et toujours à portée de main.</p><a class=\"primary\" href=\"/auth/login\">Se connecter avec Pocket ID</a></section></main>","Todo · Connexion").into_response());
     };
-    let html=format!(r#"<main class="wrap"><header class="topbar"><div class="brand"><div class="logo">✓</div><div><div class="title">Todo</div><div class="sub">L'essentiel, simplement.</div></div></div><div class="person"><span>{}</span><a href="/auth/logout" class="link">Déconnexion</a></div></header><section class="panel"><div class="heading"><div><h1>Mes tâches</h1><div class="count" id="count">Chargement…</div></div><button class="new" id="new-task">+ Nouvelle tâche</button></div><div id="tree" class="tree"><div class="empty">Chargement…</div></div></section><p class="footer">Les tâches cochées sont supprimées après 24 heures · Espace personnel</p></main><div class="overlay hidden" id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><form class="modal" id="task-form"><h2 id="modal-title">Nouvelle tâche</h2><input type="hidden" name="id"><input type="hidden" name="parent_id"><label class="field" for="task-title">Titre *</label><input class="fieldinput" id="task-title" name="title" maxlength="160" required autofocus placeholder="Que faut-il faire ?"><label class="field" for="task-description">Description (facultative)</label><textarea class="fieldinput fieldtextarea" id="task-description" name="description" maxlength="10000" placeholder="Quelques détails utiles…"></textarea><div class="modal-actions"><button class="muted" id="cancel" type="button">Annuler</button><button class="primary" type="submit">Enregistrer</button></div></form></div>"#,html_escape(&user.name));
+    let html=format!(r#"<main class="wrap"><header class="topbar"><div class="brand"><div class="logo">✓</div><div><div class="title">Todo</div><div class="sub">L'essentiel, simplement.</div></div></div><div class="person"><span>{}</span><a href="/auth/logout" class="link">Déconnexion</a></div></header><section class="panel"><div class="heading"><div><h1>Mes tâches</h1><div class="count" id="count">Chargement…</div></div><button class="new" id="new-task">+ Nouvelle tâche</button></div><div id="tree" class="tree"><div class="empty">Chargement…</div></div></section><p class="footer">Les tâches cochées non récurrentes sont supprimées après 24 heures, sauf dans une branche récurrente · Espace personnel</p></main><div class="overlay hidden" id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><form class="modal" id="task-form"><h2 id="modal-title">Nouvelle tâche</h2><input type="hidden" name="id"><input type="hidden" name="parent_id"><label class="field" for="task-title">Titre *</label><input class="fieldinput" id="task-title" name="title" maxlength="160" required autofocus placeholder="Que faut-il faire ?"><label class="field" for="task-description">Description (facultative)</label><textarea class="fieldinput fieldtextarea" id="task-description" name="description" maxlength="10000" placeholder="Quelques détails utiles…"></textarea><div class="modal-actions"><button class="muted" id="cancel" type="button">Annuler</button><button class="primary" type="submit">Enregistrer</button></div></form></div>"#,html_escape(&user.name));
     add_security_headers(shell(&html,"Todo · Mes tâches").into_response())
 }
 async fn style()->Response { let mut r=( [(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../static/style.css") ).into_response();r.headers_mut().insert("x-content-type-options",HeaderValue::from_static("nosniff"));r }
@@ -142,13 +142,15 @@ async fn auth_logout(State(s):State<Arc<AppState>>,headers:HeaderMap)->Response 
 }
 async fn list_tasks(State(s):State<Arc<AppState>>,h:HeaderMap)->ApiResult<Json<Vec<Task>>> {
     let user=require_user(&s,&h).await?;
-    let tasks=sqlx::query_as::<_,Task>("SELECT id,parent_id,title,description,sort_order,completed_at,created_at FROM tasks WHERE owner_sub=? ORDER BY sort_order ASC,created_at ASC")
+    let tasks=sqlx::query_as::<_,Task>("SELECT id,parent_id,title,description,category,category_color,recurrence,sort_order,completed_at,next_reset_at,created_at FROM tasks WHERE owner_sub=? ORDER BY sort_order ASC,created_at ASC")
       .bind(&user.sub).fetch_all(&s.db).await.map_err(server_error)?;
     Ok(Json(tasks))
 }
 fn validate_task(t:&TaskInput)->ApiResult<()> {
     if t.title.trim().is_empty()||t.title.chars().count()>160 {return Err(api_error(StatusCode::BAD_REQUEST,"Le titre doit contenir entre 1 et 160 caractères"));}
     if t.description.chars().count()>10000 {return Err(api_error(StatusCode::BAD_REQUEST,"Description trop longue"));}
+    if t.category.chars().count()>40 {return Err(api_error(StatusCode::BAD_REQUEST,"Catégorie trop longue"));}
+    if !["none","daily","weekly","monthly","quarterly","yearly"].contains(&t.recurrence.as_str()) {return Err(api_error(StatusCode::BAD_REQUEST,"Récurrence invalide"));}
     Ok(())
 }
 async fn parent_valid(s:&AppState,sub:&str,id:&str)->ApiResult<bool> {
@@ -158,25 +160,46 @@ async fn parent_valid(s:&AppState,sub:&str,id:&str)->ApiResult<bool> {
 async fn create_task(State(s):State<Arc<AppState>>,h:HeaderMap,Json(t):Json<TaskInput>)->ApiResult<(StatusCode,Json<serde_json::Value>)> {
     guard_write(&h,&s)?;let u=require_user(&s,&h).await?;validate_task(&t)?;
     if let Some(ref parent)=t.parent_id {if !parent_valid(&s,&u.sub,parent).await? {return Err(api_error(StatusCode::BAD_REQUEST,"Tâche parent introuvable"));}}
-    let order: i64=sqlx::query_scalar("SELECT COALESCE(MAX(sort_order),-1)+1 FROM tasks WHERE owner_sub=? AND parent_id IS ?")
+    let max_order:i64=sqlx::query_scalar("SELECT COALESCE(MAX(sort_order),-1) FROM tasks WHERE owner_sub=? AND parent_id IS ?")
        .bind(&u.sub).bind(&t.parent_id).fetch_one(&s.db).await.map_err(server_error)?;
+    let order=t.position.unwrap_or(max_order+1).max(0).min(max_order+1);
+    let color=if t.category_color.trim().is_empty() { "".to_string() } else { t.category_color.trim().to_string() };
     let id=uuid::Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO tasks(id,owner_sub,parent_id,title,description,sort_order,created_at) VALUES (?,?,?,?,?,?,?)")
-       .bind(&id).bind(&u.sub).bind(&t.parent_id).bind(t.title.trim()).bind(t.description.trim()).bind(order).bind(Utc::now().timestamp()).execute(&s.db).await.map_err(server_error)?;
+    sqlx::query("INSERT INTO tasks(id,owner_sub,parent_id,title,description,category,category_color,recurrence,sort_order,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+       .bind(&id).bind(&u.sub).bind(&t.parent_id).bind(t.title.trim()).bind(t.description.trim()).bind(t.category.trim()).bind(color).bind(&t.recurrence).bind(order).bind(Utc::now().timestamp()).execute(&s.db).await.map_err(server_error)?;
     Ok((StatusCode::CREATED,Json(serde_json::json!({"id":id}))))
 }
 async fn edit_task(State(s):State<Arc<AppState>>,Path(id):Path<String>,h:HeaderMap,Json(t):Json<TaskInput>)->ApiResult<Json<serde_json::Value>> {
     guard_write(&h,&s)?;let u=require_user(&s,&h).await?;validate_task(&t)?;
     // Le parent n'est pas modifiable à l'édition; pas de cycle possible.
-    let res=sqlx::query("UPDATE tasks SET title=?,description=? WHERE id=? AND owner_sub=?")
-      .bind(t.title.trim()).bind(t.description.trim()).bind(&id).bind(&u.sub).execute(&s.db).await.map_err(server_error)?;
+    let previous:Option<(Option<i64>,String,Option<i64>)>=sqlx::query_as("SELECT completed_at,recurrence,next_reset_at FROM tasks WHERE id=? AND owner_sub=?").bind(&id).bind(&u.sub).fetch_optional(&s.db).await.map_err(server_error)?;
+    let Some((completed,old_recurrence,old_reset))=previous else {return Err(api_error(StatusCode::NOT_FOUND,"Tâche introuvable"));};
+    let next=if old_recurrence==t.recurrence {old_reset} else {completed.and_then(|_| recurrence_after(Utc::now().timestamp(),&t.recurrence))};
+    let res=sqlx::query("UPDATE tasks SET title=?,description=?,category=?,category_color=?,recurrence=?,next_reset_at=? WHERE id=? AND owner_sub=?")
+      .bind(t.title.trim()).bind(t.description.trim()).bind(t.category.trim()).bind(if t.category_color.trim().is_empty(){""}else{t.category_color.trim()}).bind(&t.recurrence).bind(next).bind(&id).bind(&u.sub).execute(&s.db).await.map_err(server_error)?;
+    if let Some(position)=t.position { set_position(&s,&u.sub,&id,position).await?; }
     if res.rows_affected()==0 {return Err(api_error(StatusCode::NOT_FOUND,"Tâche introuvable"));}
     Ok(Json(serde_json::json!({"ok":true})))
 }
+fn recurrence_after(now:i64, recurrence:&str)->Option<i64> {
+    let seconds=match recurrence { "daily"=>86400, "weekly"=>604800, "monthly"=>30*86400, "quarterly"=>90*86400, "yearly"=>365*86400, _=>return None };
+    Some(now+seconds)
+}
+async fn set_position(s:&AppState,sub:&str,id:&str,position:i64)->ApiResult<()> {
+    let Some((parent,old)):Option<(Option<String>,i64)>=sqlx::query_as("SELECT parent_id,sort_order FROM tasks WHERE id=? AND owner_sub=?").bind(id).bind(sub).fetch_optional(&s.db).await.map_err(server_error)? else { return Err(api_error(StatusCode::NOT_FOUND,"Tâche introuvable")); };
+    let ids:Vec<String>=sqlx::query_scalar("SELECT id FROM tasks WHERE owner_sub=? AND parent_id IS ? ORDER BY sort_order,id").bind(sub).bind(&parent).fetch_all(&s.db).await.map_err(server_error)?;
+    let mut ordered=ids.into_iter().filter(|x|x!=id).collect::<Vec<_>>();
+    let pos=position.max(0).min(ordered.len() as i64) as usize; ordered.insert(pos,id.to_string());
+    for (index,task_id) in ordered.iter().enumerate() { sqlx::query("UPDATE tasks SET sort_order=? WHERE owner_sub=? AND id=?").bind(index as i64).bind(sub).bind(task_id).execute(&s.db).await.map_err(server_error)?; }
+    let _=old;
+    Ok(())
+}
 async fn check_task(State(s):State<Arc<AppState>>,Path(id):Path<String>,h:HeaderMap,Json(v):Json<CheckInput>)->ApiResult<Json<serde_json::Value>> {
     guard_write(&h,&s)?;let u=require_user(&s,&h).await?;
-    let result=sqlx::query("UPDATE tasks SET completed_at=? WHERE id=? AND owner_sub=?")
-      .bind(if v.done{Some(Utc::now().timestamp())}else{None}).bind(id).bind(u.sub).execute(&s.db).await.map_err(server_error)?;
+    let recurrence:Option<String>=sqlx::query_scalar("SELECT recurrence FROM tasks WHERE id=? AND owner_sub=?").bind(&id).bind(&u.sub).fetch_optional(&s.db).await.map_err(server_error)?;
+    let next=if v.done { recurrence.as_deref().and_then(|r| recurrence_after(Utc::now().timestamp(),r)) } else { None };
+    let result=sqlx::query("UPDATE tasks SET completed_at=?,next_reset_at=? WHERE id=? AND owner_sub=?")
+      .bind(if v.done{Some(Utc::now().timestamp())}else{None}).bind(next).bind(id).bind(u.sub).execute(&s.db).await.map_err(server_error)?;
     if result.rows_affected()==0{return Err(api_error(StatusCode::NOT_FOUND,"Tâche introuvable"));}
     Ok(Json(serde_json::json!({"ok":true})))
 }
@@ -214,26 +237,61 @@ async fn move_task(State(s):State<Arc<AppState>>,Path(id):Path<String>,h:HeaderM
     tx.commit().await.map_err(server_error)?;
     Ok(Json(serde_json::json!({"ok":true})))
 }
+async fn position_task(State(s):State<Arc<AppState>>,Path(id):Path<String>,h:HeaderMap,Json(v):Json<serde_json::Value>)->ApiResult<Json<serde_json::Value>> {
+    guard_write(&h,&s)?; let u=require_user(&s,&h).await?;
+    let position=v.get("position").and_then(|x|x.as_i64()).unwrap_or(0);
+    set_position(&s,&u.sub,&id,position).await?;
+    Ok(Json(serde_json::json!({"ok":true})))
+}
 async fn init_db(db:&SqlitePool)->Result<()> {
     sqlx::query("PRAGMA foreign_keys=ON").execute(db).await?;
     for sql in [
       "CREATE TABLE IF NOT EXISTS users (sub TEXT PRIMARY KEY, name TEXT NOT NULL)",
       "CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_sub TEXT NOT NULL REFERENCES users(sub) ON DELETE CASCADE, expires_at INTEGER NOT NULL)",
       "CREATE TABLE IF NOT EXISTS auth_flows (state_hash TEXT PRIMARY KEY, browser_hash TEXT NOT NULL, verifier TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL)",
-      "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, owner_sub TEXT NOT NULL REFERENCES users(sub) ON DELETE CASCADE, parent_id TEXT REFERENCES tasks(id) ON DELETE CASCADE, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0, completed_at INTEGER, created_at INTEGER NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, owner_sub TEXT NOT NULL REFERENCES users(sub) ON DELETE CASCADE, parent_id TEXT REFERENCES tasks(id) ON DELETE CASCADE, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '', category_color TEXT NOT NULL DEFAULT '#7c8cff', recurrence TEXT NOT NULL DEFAULT 'none', sort_order INTEGER NOT NULL DEFAULT 0, completed_at INTEGER, next_reset_at INTEGER, created_at INTEGER NOT NULL)",
       "CREATE INDEX IF NOT EXISTS idx_tasks_owner_parent_sort ON tasks(owner_sub,parent_id,sort_order)",
       "CREATE INDEX IF NOT EXISTS idx_tasks_completed ON tasks(completed_at)",
       "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)",
     ] {sqlx::query(sql).execute(db).await?;}
+    for sql in ["ALTER TABLE tasks ADD COLUMN category TEXT NOT NULL DEFAULT ''", "ALTER TABLE tasks ADD COLUMN category_color TEXT NOT NULL DEFAULT '#7c8cff'", "ALTER TABLE tasks ADD COLUMN recurrence TEXT NOT NULL DEFAULT 'none'", "ALTER TABLE tasks ADD COLUMN next_reset_at INTEGER"] { let _=sqlx::query(sql).execute(db).await; }
+    sqlx::query("UPDATE tasks SET category_color='' WHERE category!='' AND category_color='#7c8cff'").execute(db).await?;
     Ok(())
 }
 async fn cleanup(db:&SqlitePool)->Result<()> {
     let now=Utc::now().timestamp();
+    let mut tx=db.begin().await?;
+    sqlx::query("WITH RECURSIVE reset(id, owner_sub) AS (SELECT id, owner_sub FROM tasks WHERE recurrence!='none' AND next_reset_at IS NOT NULL AND next_reset_at<=? UNION SELECT t.id,t.owner_sub FROM tasks t JOIN reset r ON t.parent_id=r.id AND t.owner_sub=r.owner_sub) UPDATE tasks SET completed_at=NULL,next_reset_at=NULL WHERE id IN (SELECT id FROM reset)").bind(now).execute(&mut *tx).await?;
     // Les enfants d'une tâche supprimée sont supprimés en cascade, même non cochés.
-    sqlx::query("DELETE FROM tasks WHERE completed_at IS NOT NULL AND completed_at<=?").bind(now-86400).execute(db).await?;
+    sqlx::query("WITH RECURSIVE protected(id,owner_sub) AS (SELECT id,owner_sub FROM tasks WHERE recurrence!='none' UNION SELECT t.id,t.owner_sub FROM tasks t JOIN protected p ON t.parent_id=p.id AND t.owner_sub=p.owner_sub), ancestors(id,owner_sub) AS (SELECT id,owner_sub FROM tasks WHERE recurrence!='none' UNION SELECT t.parent_id,t.owner_sub FROM tasks t JOIN ancestors a ON t.id=a.id AND t.owner_sub=a.owner_sub WHERE t.parent_id IS NOT NULL) DELETE FROM tasks WHERE completed_at IS NOT NULL AND completed_at<=? AND id NOT IN (SELECT id FROM protected UNION SELECT id FROM ancestors)").bind(now-86400).execute(&mut *tx).await?;
+    tx.commit().await?;
     sqlx::query("DELETE FROM sessions WHERE expires_at<=?").bind(now).execute(db).await?;
     sqlx::query("DELETE FROM auth_flows WHERE expires_at<=?").bind(now).execute(db).await?;
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cleanup_preserves_and_resets_recurring_branches() -> Result<()> {
+        let db=SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await?;
+        init_db(&db).await?;
+        sqlx::query("INSERT INTO users(sub,name) VALUES ('user','User')").execute(&db).await?;
+        let now=Utc::now().timestamp();
+        for (id,parent,recurrence,reset) in [("ancestor",None,"none",None),("weekly",Some("ancestor"),"weekly",Some(now+10)),("child",Some("weekly"),"none",None),("ordinary",None,"none",None)] {
+            sqlx::query("INSERT INTO tasks(id,owner_sub,parent_id,title,recurrence,sort_order,created_at,completed_at,next_reset_at) VALUES (?,'user',?,?,?,0,?,?,?)")
+                .bind(id).bind(parent).bind(id).bind(recurrence).bind(now).bind(now-90000).bind(reset).execute(&db).await?;
+        }
+        cleanup(&db).await?;
+        let ids:Vec<String>=sqlx::query_scalar("SELECT id FROM tasks ORDER BY id").fetch_all(&db).await?;
+        assert_eq!(ids,vec!["ancestor","child","weekly"]);
+        sqlx::query("UPDATE tasks SET next_reset_at=? WHERE id='weekly'").bind(now-1).execute(&db).await?;
+        cleanup(&db).await?;
+        let states:Vec<(String,Option<i64>)>=sqlx::query_as("SELECT id,completed_at FROM tasks ORDER BY id").fetch_all(&db).await?;
+        assert_eq!(states,vec![("ancestor".to_string(),Some(now-90000)),("child".to_string(),None),("weekly".to_string(),None)]);
+        Ok(())
+    }
 }
 #[tokio::main]
 async fn main()->Result<()> {
@@ -261,7 +319,7 @@ async fn main()->Result<()> {
       .route("/auth/login",get(auth_login)).route("/auth/callback",get(auth_callback)).route("/auth/logout",get(auth_logout))
       .route("/api/tasks",get(list_tasks).post(create_task))
       .route("/api/tasks/{id}",axum::routing::patch(edit_task).delete(delete_task))
-      .route("/api/tasks/{id}/check",post(check_task)).route("/api/tasks/{id}/move",post(move_task))
+      .route("/api/tasks/{id}/check",post(check_task)).route("/api/tasks/{id}/move",post(move_task)).route("/api/tasks/{id}/position",post(position_task))
       .with_state(s);
     let listener=tokio::net::TcpListener::bind(("0.0.0.0",port)).await?;
     info!("Todo démarre sur 0.0.0.0:{port}");
