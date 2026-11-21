@@ -4,18 +4,20 @@ Application de tâches personnelle, sans framework frontend, adaptée à 4–5 u
 
 ## Fonctionnalités
 
-Les tâches récurrentes et leurs descendants sont conservés. Cocher une tâche récurrente ne coche pas ses enfants ; à la fin de sa période, elle et tous ses descendants sont décochés. La période commence au moment où la tâche récurrente est cochée : 24 heures, 7 jours, 30 jours, 90 jours ou 365 jours selon la récurrence. Un parent contenant une tâche récurrente est aussi conservé pour éviter sa suppression en cascade.
+Les tâches récurrentes et leurs descendants sont conservés. Ils sont décochés au début de chaque période : minuit, lundi, premier du mois, premier janvier/avril/juillet/octobre ou premier janvier. Le fuseau par défaut est `Europe/Paris`, configurable avec `TODO_TIMEZONE`. Un parent contenant une tâche récurrente est conservé pour éviter sa suppression en cascade. Les suppressions et réinitialisations automatiques apparaissent dans l'activité, conservée 90 jours (200 événements récents affichés).
 
 - Authentification OIDC via Pocket ID : Authorization Code + PKCE S256, `state` + cookie de navigateur, `nonce`, ID Token signé vérifié avec JWKS et contrôle issuer/audience/expiration.
 - Sessions de 7 jours, jetons de session opaques, hachés dans SQLite, cookies `HttpOnly; Secure; SameSite=Lax`.
-- Un espace **privé par compte Pocket ID** (`sub`), sans partage des listes entre utilisateurs.
+- Un espace **privé par compte Pocket ID** (`sub`). Une tâche peut être partagée par lien sous forme de copie indépendante.
 - Tâches avec titre, description optionnelle, parent optionnel et **ordre manuel** (pas de priorité).
-- Sous-tâches indentées sous leur parent, masquées avec la description lorsque le parent est replié. Pas de changement de parent après création.
-- Menu « ⋯ » par tâche : modifier, monter, descendre, supprimer ; bouton « + » pour ajouter un enfant.
+- Sous-tâches présentées dans un carrousel par niveau. Pas de changement de parent après création.
+- Menu « ⋯ » par tâche : modifier, partager, monter, descendre, supprimer ; bouton « + » pour ajouter un enfant.
+- Le lien de partage contient une copie figée de la tâche et de ses descendants (jusqu'à 1 000 tâches), avec descriptions, catégories et récurrences. Le destinataire connecté prévisualise et choisit une destination (racine, tâche existante ou nouvelle tâche parente) avant de confirmer l'import ; les copies sont décochées. Toute personne connectée disposant du lien peut l'utiliser, sans expiration automatique.
 - Tâche terminée : grisée, titre barré. Décochage possible avant échéance.
-- Suppression automatique après 24 h (contrôle au démarrage, puis chaque minute).
+- Suppression automatique après 24 h pour les tâches cochées hors branche récurrente (contrôle au démarrage, puis chaque minute).
 - Suppression d'une tâche parent : suppression en cascade de ses sous-tâches, y compris non terminées.
 - Interface responsive, légère : CSS et JS natifs, aucun CDN ni dépendance npm.
+- Actualisation au retour sur l'onglet puis toutes les 30 secondes hors saisie ; couleurs des catégories déterminées par leur nom en minuscules.
 - Stockage persistant Docker / SQLite WAL. Aucun port publié sur l'hôte : Traefik est le seul point d'accès.
 
 ## 1. Préparer Traefik
@@ -75,9 +77,23 @@ TRAEFIK_CERTRESOLVER=letsencrypt
 OIDC_ISSUER_URL=https://VOTRE-POCKET-ID
 OIDC_CLIENT_ID=VOTRE_CLIENT_ID
 OIDC_CLIENT_SECRET=VOTRE_SECRET
+TODO_TIMEZONE=Europe/Paris
 ```
 
 Après déploiement, visiter `https://todo.example.com`. Le bouton de connexion redirige vers Pocket ID. Le certificat doit être valide avant la connexion OIDC.
+Un VPN ne change pas l'origine si l'adresse du site reste identique. Si l'adresse change, adapter `PUBLIC_URL` et l'URL de callback dans Pocket ID.
+
+### Tester depuis un téléphone
+
+Sur le PC, dans PowerShell, remplacer l'adresse par l'IP locale du PC :
+
+```powershell
+$env:TEST_HOST="192.168.1.50"
+$env:TEST_LOGIN="1"
+docker compose -f compose.test.yaml up -d --build
+```
+
+Ouvrir `http://192.168.1.50:3080` sur le téléphone connecté au même réseau. Utiliser cette même adresse sur le PC. Autoriser le port 3080 dans le pare-feu si nécessaire. `TEST_LOGIN=1` active un compte de test local commun, sans Pocket ID ; ne l'utiliser que sur un réseau de confiance. Pour revenir au mode de test OIDC : supprimer les variables et relancer Compose.
 
 L'application ne démarre volontairement **pas** si Pocket ID n'est pas joignable ou si les variables OIDC sont incorrectes. Consulter les logs pour identifier l'erreur.
 
@@ -94,6 +110,8 @@ docker run --rm -v todo_todo_data:/data -v "$PWD":/backup alpine sh -c 'apk add 
 
 **Attention** : le nom du volume Docker peut varier selon le nom du projet Compose, visible via `docker volume ls`. Ne pas sauvegarder uniquement le fichier `todo.db` à chaud sans les fichiers WAL, préférer une sauvegarde SQLite cohérente ou arrêter l'application avant la copie.
 
+Pour restaurer, arrêter l'application, remplacer la base du volume par une sauvegarde SQLite cohérente, puis redémarrer. Tester la restauration sur un volume séparé avant d'en avoir besoin.
+
 ### Endpoints
 
 - `GET /health` : test de santé simple (non authentifié).
@@ -106,10 +124,10 @@ docker run --rm -v todo_todo_data:/data -v "$PWD":/backup alpine sh -c 'apk add 
 - Pas de tâches partagées entre utilisateurs.
 - Pas de pièces jointes, notifications, échéances, compte administrateur ou gestion de comptes dans l'app : Pocket ID gère les accès.
 - Glisser-déposer disponible entre tâches sœurs ; les boutons Monter / Descendre restent disponibles dans le détail.
-- Une tâche peut être validée même si ses enfants ne sont pas validés ; après 24 h, le parent et ses descendants seront tous supprimés.
+- Une tâche non récurrente cochée peut être supprimée avec ses descendants après 24 h, sauf si la branche contient une tâche récurrente.
 - Au prochain login, un utilisateur précédemment autorisé et ensuite retiré des groupes Pocket ID **peut garder sa session locale active jusqu'à sept jours** : la révocation instantanée et le back-channel logout ne sont pas implémentés. En cas de révocation urgente, effacer les sessions SQLite ou stopper l'app.
 - Aucun mécanisme de limitation du nombre de tentatives intégré ; à assurer via le reverse proxy si nécessaire.
-- Code fourni comme base déployable ; compiler et tester sur VPS avant usage en production : cette archive n'a pas été compilée dans l'environnement de génération.
+- Vérifier la configuration, les sauvegardes et la restauration sur le VPS avant utilisation en production.
 
 ## Architecture
 
@@ -124,11 +142,11 @@ Traefik Docker → todo (Rust / Axum)
                          └─ port interne APP_PORT
 ```
 
-## Mise à jour de l’interface (V2)
+Un clic sur le titre affiche la description et la page des enfants. Un second clic referme la sélection. Les actions Modifier, Monter, Descendre et Supprimer se trouvent dans le menu « ⋯ ».
 
-Un clic sur le titre ou le chevron déplie simultanément la description et les enfants. Le repli cache les deux, sans supprimer de données. Les actions Modifier, Monter, Descendre et Supprimer se trouvent dans le menu « ⋯ ».
+## Tests
 
-Pour déployer cette version depuis le dossier du projet sur le VPS : `docker compose up -d --build`. Les données restent dans le volume Docker existant.
+`cargo test --locked` vérifie le serveur. Pour les parcours navigateur (API simulée) : `npm ci`, `npx playwright install chromium`, puis `npm run test:ui`. Ces dépendances npm servent uniquement aux tests.
 
 ## Releases GitHub
 

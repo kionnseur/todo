@@ -11,7 +11,9 @@ services:
       # Le conteneur écoute sur APP_PORT ; le port hôte est configurable.
       APP_ENV: test
       APP_PORT: 3080
-      PUBLIC_URL: http://localhost:${HOST_PORT:-3080}
+      PUBLIC_URL: http://${TEST_HOST:-localhost}:${HOST_PORT:-3080}
+      TEST_LOGIN: ${TEST_LOGIN:-0}
+      TODO_TIMEZONE: ${TODO_TIMEZONE:-Europe/Paris}
       OIDC_ISSUER_URL: http://oidc.localhost:8090/default
       OIDC_CLIENT_ID: todo-test
       OIDC_CLIENT_SECRET: todo-test-secret

@@ -12,6 +12,7 @@ services:
       OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:?OIDC_ISSUER_URL manquant}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?OIDC_CLIENT_ID manquant}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?OIDC_CLIENT_SECRET manquant}
+      TODO_TIMEZONE: ${TODO_TIMEZONE:-Europe/Paris}
       DATABASE_URL: sqlite:///data/todo.db
       RUST_LOG: ${RUST_LOG:-todo=info}
     volumes:
