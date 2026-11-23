@@ -4,7 +4,7 @@ Application de tâches personnelle, sans framework frontend, adaptée à 4–5 u
 
 ## Fonctionnalités
 
-Les tâches récurrentes et leurs descendants sont conservés. Ils sont décochés au début de chaque période : minuit, lundi, premier du mois, premier janvier/avril/juillet/octobre ou premier janvier. Le fuseau par défaut est `Europe/Paris`, configurable avec `TODO_TIMEZONE`. Un parent contenant une tâche récurrente est conservé pour éviter sa suppression en cascade. Les suppressions et réinitialisations automatiques apparaissent dans l'activité, conservée 90 jours (200 événements récents affichés).
+Les tâches récurrentes et leurs descendants sont conservés. Ils sont décochés au début de chaque période : minuit, lundi, premier du mois, premier janvier/avril/juillet/octobre ou premier janvier. Le fuseau par défaut est `Europe/Paris`, configurable avec `TODO_TIMEZONE`. Un parent contenant une tâche récurrente est conservé pour éviter sa suppression en cascade. L'activité distingue les prochaines actions prévues (dates et nombre de tâches concernées, cascades comprises) et l'historique, conservé 90 jours (200 événements récents affichés). Les prévisions sont calculées à la consultation, sans modifier les tâches, et évoluent selon leur état.
 
 - Authentification OIDC via Pocket ID : Authorization Code + PKCE S256, `state` + cookie de navigateur, `nonce`, ID Token signé vérifié avec JWKS et contrôle issuer/audience/expiration.
 - Sessions de 7 jours, jetons de session opaques, hachés dans SQLite, cookies `HttpOnly; Secure; SameSite=Lax`.
@@ -12,7 +12,8 @@ Les tâches récurrentes et leurs descendants sont conservés. Ils sont décoch�
 - Tâches avec titre, description optionnelle, parent optionnel et **ordre manuel** (pas de priorité).
 - Sous-tâches présentées dans un carrousel par niveau. Pas de changement de parent après création.
 - Menu « ⋯ » par tâche : modifier, partager, monter, descendre, supprimer ; bouton « + » pour ajouter un enfant.
-- Le lien de partage contient une copie figée de la tâche et de ses descendants (jusqu'à 1 000 tâches), avec descriptions, catégories et récurrences. Le destinataire connecté prévisualise et choisit une destination (racine, tâche existante ou nouvelle tâche parente) avant de confirmer l'import ; les copies sont décochées. Toute personne connectée disposant du lien peut l'utiliser, sans expiration automatique.
+- Le lien de partage contient une copie figée de la tâche et de ses descendants (jusqu'à 1 000 tâches), avec descriptions, catégories et récurrences. Le destinataire connecté prévisualise et choisit une destination (racine, tâche existante ou nouvelle tâche parente) avant de confirmer l'import ; les copies sont décochées. Le créateur choisit une validité d'un jour, une semaine ou sans expiration, puis peut désactiver ses liens depuis leur liste. Les liens expirés ou désactivés ne permettent plus d'importer ; les copies déjà importées sont conservées. Un avertissement signale un partage déjà importé.
+- Recherche insensible aux accents, à la casse et aux ligatures (`cœur` / `coeur`), combinant plusieurs mots du titre, de la description, de la catégorie ou du chemin parent. Les titres exacts sont affichés en premier et les résultats sont navigables au clavier.
 - Tâche terminée : grisée, titre barré. Décochage possible avant échéance.
 - Suppression automatique après 24 h pour les tâches cochées hors branche récurrente (contrôle au démarrage, puis chaque minute).
 - Suppression d'une tâche parent : suppression en cascade de ses sous-tâches, y compris non terminées.
@@ -118,6 +119,7 @@ Pour restaurer, arrêter l'application, remplacer la base du volume par une sauv
 - `GET /` : interface de connexion ou page de tâches.
 - `GET /auth/login`, `GET /auth/callback`, `GET /auth/logout` : OIDC.
 - API `/api/tasks` et variantes : session obligatoire, mutations protégées par en-tête `X-Todo-Request: 1` et contrôle de l'origine si envoyée.
+- `GET /api/activity` et `GET /api/activity/upcoming` : historique et prévisions personnels ; les dates prévues utilisent le fuseau `TODO_TIMEZONE`.
 
 ## Limites assumées
 

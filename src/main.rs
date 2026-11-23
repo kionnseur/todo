@@ -1,5 +1,5 @@
 use std::{env, str::FromStr, sync::Arc, time::Duration};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use anyhow::{bail, Context, Result};
 use axum::{
     extract::{Path, Query, State},
@@ -33,6 +33,8 @@ struct User { sub: String, name: String }
 struct Task { id: String, parent_id: Option<String>, title: String, description: String, category: String, category_color: String, recurrence: String, sort_order: i64, completed_at: Option<i64>, next_reset_at: Option<i64>, created_at: i64 }
 #[derive(Debug, Serialize, FromRow)]
 struct Activity { id: i64, kind: String, title: String, occurred_at: i64 }
+#[derive(Debug, Serialize)]
+struct UpcomingActivity { task_id: String, kind: &'static str, title: String, scheduled_at: i64, affected_count: usize }
 #[derive(Debug, Deserialize)]
 struct TaskInput { title: String, #[serde(default)] description: String, #[serde(default)] parent_id: Option<String>, #[serde(default)] category: String, #[serde(default)] category_color: String, #[serde(default)] recurrence: String, #[serde(default)] position: Option<i64> }
 #[derive(Debug, Deserialize)]
@@ -41,6 +43,8 @@ struct CheckInput { done: bool }
 struct CategoryInput { category: String }
 #[derive(Debug, Default, Deserialize)]
 struct ShareImportInput { #[serde(default)] parent_id:Option<String>, #[serde(default)] new_parent_title:Option<String> }
+#[derive(Debug, Default, Deserialize)]
+struct ShareOptions { #[serde(default)] duration_seconds:Option<i64> }
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 struct SharedTask { id:String, parent_id:Option<String>, title:String, description:String, category:String, recurrence:String, sort_order:i64 }
 #[derive(Debug, Deserialize)]
@@ -185,6 +189,49 @@ async fn list_activity(State(s):State<Arc<AppState>>,h:HeaderMap)->ApiResult<Jso
     let events=sqlx::query_as::<_,Activity>("SELECT id,kind,title,occurred_at FROM activity WHERE owner_sub=? ORDER BY occurred_at DESC,id DESC LIMIT 200").bind(user.sub).fetch_all(&s.db).await.map_err(server_error)?;
     Ok(Json(events))
 }
+fn upcoming_activity(tasks:&[Task])->Vec<UpcomingActivity> {
+    let by_id:HashMap<&str,&Task>=tasks.iter().map(|task|(task.id.as_str(),task)).collect();
+    let mut children:HashMap<&str,Vec<&Task>>=HashMap::new();
+    for task in tasks {if let Some(parent)=&task.parent_id {children.entry(parent).or_default().push(task);}}
+    let mut protected=HashSet::new();
+    // Une récurrence protège à la fois sa descendance et ses ancêtres des suppressions.
+    for task in tasks.iter().filter(|task|task.recurrence!="none") {
+        let mut ancestor=Some(task);
+        while let Some(current)=ancestor {if !protected.insert(current.id.as_str()){break;}ancestor=current.parent_id.as_deref().and_then(|id|by_id.get(id).copied());}
+    }
+    let mut visited=HashSet::new();
+    let mut stack:Vec<&Task>=tasks.iter().filter(|task|task.recurrence!="none").collect();
+    while let Some(task)=stack.pop() {if !visited.insert(task.id.as_str()){continue;}protected.insert(task.id.as_str());if let Some(branch)=children.get(task.id.as_str()){stack.extend(branch);}}
+    let mut events=Vec::new();
+    let mut resets:Vec<&Task>=tasks.iter().filter(|task|task.recurrence!="none"&&task.next_reset_at.is_some()).collect();
+    resets.sort_by_key(|task|(task.next_reset_at.unwrap(),task.id.as_str()));
+    let mut checked:HashSet<&str>=tasks.iter().filter(|task|task.completed_at.is_some()).map(|task|task.id.as_str()).collect();
+    for task in resets {
+        let Some(scheduled_at)=task.next_reset_at else {continue};
+        let mut affected_count=0;let mut branch=vec![task];
+        while let Some(item)=branch.pop() {affected_count+=usize::from(checked.remove(item.id.as_str()));if let Some(descendants)=children.get(item.id.as_str()){branch.extend(descendants);}}
+        events.push(UpcomingActivity{task_id:task.id.clone(),kind:"reset",title:task.title.clone(),scheduled_at,affected_count});
+    }
+    let mut deletions:Vec<&Task>=tasks.iter().filter(|task|task.completed_at.is_some()&&!protected.contains(task.id.as_str())).collect();
+    // À date égale, traiter le parent avant son enfant pour regrouper la cascade.
+    let depth=|task:&Task|{let mut count=0;let mut parent=task.parent_id.as_deref();while let Some(id)=parent {count+=1;parent=by_id.get(id).and_then(|task|task.parent_id.as_deref());}count};
+    deletions.sort_by_key(|task|(task.completed_at.unwrap(),depth(task),task.id.as_str()));
+    let mut removed=HashSet::new();
+    for task in deletions {
+        if removed.contains(task.id.as_str()){continue;}
+        let mut affected_count=0;let mut branch=vec![task];
+        while let Some(item)=branch.pop() {if !removed.insert(item.id.as_str()){continue;}affected_count+=1;if let Some(descendants)=children.get(item.id.as_str()){branch.extend(descendants);}}
+        events.push(UpcomingActivity{task_id:task.id.clone(),kind:"deleted",title:task.title.clone(),scheduled_at:task.completed_at.unwrap().saturating_add(86400),affected_count});
+    }
+    events.sort_by(|a,b|a.scheduled_at.cmp(&b.scheduled_at).then_with(||a.task_id.cmp(&b.task_id)));
+    events
+}
+async fn list_upcoming_activity(State(s):State<Arc<AppState>>,h:HeaderMap)->ApiResult<Json<serde_json::Value>> {
+    let user=require_user(&s,&h).await?;
+    let tasks=sqlx::query_as::<_,Task>("SELECT id,parent_id,title,description,category,category_color,recurrence,sort_order,completed_at,next_reset_at,created_at FROM tasks WHERE owner_sub=?")
+        .bind(user.sub).fetch_all(&s.db).await.map_err(server_error)?;
+    Ok(Json(serde_json::json!({"events":upcoming_activity(&tasks),"timezone":env::var("TODO_TIMEZONE").unwrap_or_else(|_|"Europe/Paris".into())})))
+}
 fn validate_task(t:&TaskInput)->ApiResult<()> {
     if t.title.trim().is_empty()||t.title.chars().count()>160 {return Err(api_error(StatusCode::BAD_REQUEST,"Le titre doit contenir entre 1 et 160 caractères"));}
     if t.description.chars().count()>10000 {return Err(api_error(StatusCode::BAD_REQUEST,"Description trop longue"));}
@@ -231,29 +278,44 @@ async fn set_category(State(s):State<Arc<AppState>>,Path(id):Path<String>,h:Head
     if result.rows_affected()==0 {return Err(api_error(StatusCode::NOT_FOUND,"Tâche introuvable"));}
     Ok(StatusCode::NO_CONTENT)
 }
-async fn create_share(State(s):State<Arc<AppState>>,Path(id):Path<String>,h:HeaderMap)->ApiResult<Json<serde_json::Value>> {
+async fn create_share(State(s):State<Arc<AppState>>,Path(id):Path<String>,h:HeaderMap,Json(options):Json<ShareOptions>)->ApiResult<Json<serde_json::Value>> {
     guard_write(&h,&s)?;let user=require_user(&s,&h).await?;
+    if !matches!(options.duration_seconds,None|Some(86400)|Some(604800)){return Err(api_error(StatusCode::BAD_REQUEST,"Durée invalide"));}
     let tasks=sqlx::query_as::<_,SharedTask>("WITH RECURSIVE branch(id,depth) AS (SELECT id,0 FROM tasks WHERE id=? AND owner_sub=? UNION ALL SELECT t.id,b.depth+1 FROM tasks t JOIN branch b ON t.parent_id=b.id WHERE t.owner_sub=?) SELECT t.id,CASE WHEN b.depth=0 THEN NULL ELSE t.parent_id END AS parent_id,t.title,t.description,t.category,t.recurrence,t.sort_order FROM branch b JOIN tasks t ON t.id=b.id ORDER BY b.depth,t.sort_order,t.created_at LIMIT 1001")
         .bind(&id).bind(&user.sub).bind(&user.sub).fetch_all(&s.db).await.map_err(server_error)?;
     if tasks.is_empty(){return Err(api_error(StatusCode::NOT_FOUND,"Tâche introuvable"));}
     if tasks.len()>1000{return Err(api_error(StatusCode::BAD_REQUEST,"Ce partage contient trop de tâches"));}
     let token=random_url_token();let snapshot=serde_json::to_string(&tasks).map_err(server_error)?;
-    sqlx::query("INSERT INTO shared_tasks(token_hash,owner_sub,snapshot) VALUES (?,?,?)").bind(digest(&token)).bind(user.sub).bind(snapshot).execute(&s.db).await.map_err(server_error)?;
-    Ok(Json(serde_json::json!({"token":token})))
+    let now=Timestamp::now().as_second();let expires=options.duration_seconds.map(|duration|now+duration);
+    sqlx::query("INSERT INTO shared_tasks(token_hash,owner_sub,snapshot,created_at,expires_at) VALUES (?,?,?,?,?)").bind(digest(&token)).bind(user.sub).bind(snapshot).bind(now).bind(expires).execute(&s.db).await.map_err(server_error)?;
+    Ok(Json(serde_json::json!({"token":token,"expires_at":expires})))
 }
 async fn share_snapshot(s:&AppState,token:&str)->ApiResult<Vec<SharedTask>> {
     if token.len()!=43{return Err(api_error(StatusCode::NOT_FOUND,"Lien de partage introuvable"));}
-    let snapshot:Option<String>=sqlx::query_scalar("SELECT snapshot FROM shared_tasks WHERE token_hash=?").bind(digest(token)).fetch_optional(&s.db).await.map_err(server_error)?;
-    serde_json::from_str(&snapshot.ok_or_else(||api_error(StatusCode::NOT_FOUND,"Lien de partage introuvable"))?).map_err(server_error)
+    let snapshot:Option<String>=sqlx::query_scalar("SELECT snapshot FROM shared_tasks WHERE token_hash=? AND (expires_at IS NULL OR expires_at>?)").bind(digest(token)).bind(Timestamp::now().as_second()).fetch_optional(&s.db).await.map_err(server_error)?;
+    serde_json::from_str(&snapshot.ok_or_else(||api_error(StatusCode::NOT_FOUND,"Lien de partage expiré ou désactivé"))?).map_err(server_error)
 }
-async fn preview_share(State(s):State<Arc<AppState>>,Path(token):Path<String>,h:HeaderMap)->ApiResult<Json<Vec<SharedTask>>> {
-    require_user(&s,&h).await?;Ok(Json(share_snapshot(&s,&token).await?))
+async fn preview_share(State(s):State<Arc<AppState>>,Path(token):Path<String>,h:HeaderMap)->ApiResult<Json<serde_json::Value>> {
+    let user=require_user(&s,&h).await?;let tasks=share_snapshot(&s,&token).await?;
+    let imported:i64=sqlx::query_scalar("SELECT COUNT(*) FROM share_imports WHERE token_hash=? AND user_sub=?").bind(digest(&token)).bind(user.sub).fetch_one(&s.db).await.map_err(server_error)?;
+    Ok(Json(serde_json::json!({"tasks":tasks,"already_imported":imported>0})))
+}
+async fn list_shares(State(s):State<Arc<AppState>>,h:HeaderMap)->ApiResult<Json<Vec<serde_json::Value>>> {
+    let user=require_user(&s,&h).await?;
+    // Ne pas transférer et désérialiser chaque copie complète pour afficher sa liste.
+    let rows:Vec<(String,String,i64,Option<i64>,i64)>=sqlx::query_as("SELECT token_hash,COALESCE(json_extract(snapshot,'$[0].title'),''),created_at,expires_at,json_array_length(snapshot) FROM shared_tasks WHERE owner_sub=? ORDER BY created_at DESC,token_hash")
+        .bind(user.sub).fetch_all(&s.db).await.map_err(server_error)?;
+    Ok(Json(rows.into_iter().map(|(id,title,created_at,expires_at,task_count)|serde_json::json!({"id":id,"title":title,"created_at":created_at,"expires_at":expires_at,"task_count":task_count})).collect()))
+}
+async fn revoke_share(State(s):State<Arc<AppState>>,Path(id):Path<String>,h:HeaderMap)->ApiResult<StatusCode> {
+    guard_write(&h,&s)?;let user=require_user(&s,&h).await?;let result=sqlx::query("DELETE FROM shared_tasks WHERE token_hash=? AND owner_sub=?").bind(id).bind(user.sub).execute(&s.db).await.map_err(server_error)?;if result.rows_affected()==0{return Err(api_error(StatusCode::NOT_FOUND,"Partage introuvable"));}Ok(StatusCode::NO_CONTENT)
 }
 async fn import_share(State(s):State<Arc<AppState>>,Path(token):Path<String>,h:HeaderMap,Json(input):Json<ShareImportInput>)->ApiResult<Json<serde_json::Value>> {
     guard_write(&h,&s)?;let user=require_user(&s,&h).await?;let tasks=share_snapshot(&s,&token).await?;
     if input.parent_id.is_some()&&input.new_parent_title.is_some(){return Err(api_error(StatusCode::BAD_REQUEST,"Choisis une seule destination"));}
     if let Some(title)=&input.new_parent_title {if title.trim().is_empty()||title.trim().chars().count()>160{return Err(api_error(StatusCode::BAD_REQUEST,"Le titre de la tâche parente doit contenir entre 1 et 160 caractères"));}}
     let mut tx=s.db.begin_with("BEGIN IMMEDIATE").await.map_err(server_error)?;
+    let valid:i64=sqlx::query_scalar("SELECT COUNT(*) FROM shared_tasks WHERE token_hash=? AND (expires_at IS NULL OR expires_at>?)").bind(digest(&token)).bind(Timestamp::now().as_second()).fetch_one(&mut *tx).await.map_err(server_error)?;if valid==0{return Err(api_error(StatusCode::NOT_FOUND,"Lien de partage expiré ou désactivé"));}
     if let Some(parent)=&input.parent_id {let exists:i64=sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE id=? AND owner_sub=?").bind(parent).bind(&user.sub).fetch_one(&mut *tx).await.map_err(server_error)?;if exists==0{return Err(api_error(StatusCode::BAD_REQUEST,"Tâche parente introuvable"));}}
     let now=Timestamp::now().as_second();let mut destination=input.parent_id;
     if let Some(title)=input.new_parent_title {let id=uuid::Uuid::new_v4().to_string();let order:i64=sqlx::query_scalar("SELECT COALESCE(MAX(sort_order),-1)+1 FROM tasks WHERE owner_sub=? AND parent_id IS NULL").bind(&user.sub).fetch_one(&mut *tx).await.map_err(server_error)?;sqlx::query("INSERT INTO tasks(id,owner_sub,title,sort_order,created_at) VALUES (?,?,?,?,?)").bind(&id).bind(&user.sub).bind(title.trim()).bind(order).bind(now).execute(&mut *tx).await.map_err(server_error)?;destination=Some(id);}
@@ -264,6 +326,7 @@ async fn import_share(State(s):State<Arc<AppState>>,Path(token):Path<String>,h:H
           .bind(&id).bind(&user.sub).bind(&parent).bind(&task.title).bind(&task.description).bind(&task.category).bind(&task.recurrence).bind(if is_root{root_order}else{task.sort_order}).bind(now).bind(recurrence_after(now,&task.recurrence)).execute(&mut *tx).await.map_err(server_error)?;
         ids.insert(task.id,id);
     }
+    sqlx::query("INSERT OR IGNORE INTO share_imports(token_hash,user_sub) VALUES (?,?)").bind(digest(&token)).bind(&user.sub).execute(&mut *tx).await.map_err(server_error)?;
     tx.commit().await.map_err(server_error)?;Ok(Json(serde_json::json!({"id":root_id})))
 }
 fn recurrence_after(now:i64, recurrence:&str)->Option<i64> {
@@ -356,7 +419,8 @@ async fn init_db(db:&SqlitePool)->Result<()> {
       "CREATE TABLE IF NOT EXISTS auth_flows (state_hash TEXT PRIMARY KEY, browser_hash TEXT NOT NULL, verifier TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL)",
       "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, owner_sub TEXT NOT NULL REFERENCES users(sub) ON DELETE CASCADE, parent_id TEXT REFERENCES tasks(id) ON DELETE CASCADE, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '', category_color TEXT NOT NULL DEFAULT '#7c8cff', recurrence TEXT NOT NULL DEFAULT 'none', sort_order INTEGER NOT NULL DEFAULT 0, completed_at INTEGER, next_reset_at INTEGER, created_at INTEGER NOT NULL)",
       "CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_sub TEXT NOT NULL REFERENCES users(sub) ON DELETE CASCADE, kind TEXT NOT NULL, title TEXT NOT NULL, occurred_at INTEGER NOT NULL)",
-      "CREATE TABLE IF NOT EXISTS shared_tasks (token_hash TEXT PRIMARY KEY, owner_sub TEXT NOT NULL REFERENCES users(sub) ON DELETE CASCADE, snapshot TEXT NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS shared_tasks (token_hash TEXT PRIMARY KEY, owner_sub TEXT NOT NULL REFERENCES users(sub) ON DELETE CASCADE, snapshot TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT 0, expires_at INTEGER)",
+      "CREATE TABLE IF NOT EXISTS share_imports (token_hash TEXT NOT NULL REFERENCES shared_tasks(token_hash) ON DELETE CASCADE, user_sub TEXT NOT NULL REFERENCES users(sub) ON DELETE CASCADE, PRIMARY KEY(token_hash,user_sub))",
       "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY)",
       "CREATE INDEX IF NOT EXISTS idx_activity_owner ON activity(owner_sub,occurred_at DESC)",
       "CREATE INDEX IF NOT EXISTS idx_activity_occurred ON activity(occurred_at)",
@@ -364,6 +428,8 @@ async fn init_db(db:&SqlitePool)->Result<()> {
       "CREATE INDEX IF NOT EXISTS idx_tasks_completed ON tasks(completed_at)",
       "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)",
     ] {sqlx::query(sql).execute(db).await?;}
+    for sql in ["ALTER TABLE shared_tasks ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0","ALTER TABLE shared_tasks ADD COLUMN expires_at INTEGER"] {let _=sqlx::query(sql).execute(db).await;}
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_shared_tasks_owner_created ON shared_tasks(owner_sub,created_at DESC)").execute(db).await?;
     for sql in ["ALTER TABLE tasks ADD COLUMN category TEXT NOT NULL DEFAULT ''", "ALTER TABLE tasks ADD COLUMN category_color TEXT NOT NULL DEFAULT '#7c8cff'", "ALTER TABLE tasks ADD COLUMN recurrence TEXT NOT NULL DEFAULT 'none'", "ALTER TABLE tasks ADD COLUMN next_reset_at INTEGER"] { let _=sqlx::query(sql).execute(db).await; }
     sqlx::query("UPDATE tasks SET category_color='' WHERE category!='' AND category_color='#7c8cff'").execute(db).await?;
     let categories:Vec<String>=sqlx::query_scalar("SELECT DISTINCT category FROM tasks WHERE category != ''").fetch_all(db).await?;
@@ -530,22 +596,32 @@ mod tests {
         sqlx::query("INSERT INTO tasks(id,owner_sub,parent_id,title,description,category,recurrence,sort_order,created_at,completed_at) VALUES ('root','a',NULL,'Parent','Description','maison','weekly',0,0,1),('child','a','root','Enfant','','courses','none',0,0,1),('other','a',NULL,'Privé','','','none',1,0,NULL)").execute(&db).await?;
         let state=Arc::new(AppState{db:db.clone(),http:reqwest::Client::new(),oidc:Discovery{issuer:String::new(),authorization_endpoint:String::new(),token_endpoint:String::new(),jwks_uri:String::new()},issuer:String::new(),client_id:String::new(),client_secret:String::new(),public_url:String::new()});
         let headers=|token:&str|{let mut h=HeaderMap::new();h.insert(header::COOKIE,HeaderValue::from_str(&format!("todo_session={token}")).unwrap());h.insert("x-todo-request",HeaderValue::from_static("1"));h};
-        assert!(create_share(State(state.clone()),Path("root".into()),headers(&tb)).await.is_err());
-        let Json(link)=create_share(State(state.clone()),Path("root".into()),headers(&ta)).await.map_err(|_|anyhow::anyhow!("share failed"))?;
+        assert!(create_share(State(state.clone()),Path("root".into()),headers(&tb),Json(ShareOptions::default())).await.is_err());
+        let Json(link)=create_share(State(state.clone()),Path("root".into()),headers(&ta),Json(ShareOptions::default())).await.map_err(|_|anyhow::anyhow!("share failed"))?;
         let token=link["token"].as_str().unwrap().to_string();
+        assert!(link["expires_at"].is_null());
+        let Json(links)=list_shares(State(state.clone()),headers(&ta)).await.map_err(|_|anyhow::anyhow!("list shares failed"))?;
+        assert_eq!(links.len(),1);assert_eq!(links[0]["title"],"Parent");assert_eq!(links[0]["task_count"],2);
+        assert_eq!(links[0]["id"],digest(&token));assert!(links[0].get("token").is_none());
+        let Json(private)=list_shares(State(state.clone()),headers(&tb)).await.map_err(|_|anyhow::anyhow!("list shares failed"))?;
+        assert!(private.is_empty());
         sqlx::query("UPDATE tasks SET title='Modifié' WHERE id='root'").execute(&db).await?;
         let Json(preview)=preview_share(State(state.clone()),Path(token.clone()),headers(&tb)).await.map_err(|_|anyhow::anyhow!("preview failed"))?;
-        assert_eq!(preview.len(),2);assert_eq!(preview[0].title,"Parent");
+        assert_eq!(preview["tasks"].as_array().unwrap().len(),2);assert_eq!(preview["tasks"][0]["title"],"Parent");assert_eq!(preview["already_imported"],false);
         assert!(import_share(State(state.clone()),Path(token.clone()),headers(&tb),Json(ShareImportInput{parent_id:Some("other".into()),new_parent_title:None})).await.is_err());
         let Json(result)=import_share(State(state.clone()),Path(token.clone()),headers(&tb),Json(ShareImportInput::default())).await.map_err(|_|anyhow::anyhow!("import failed"))?;
         let root=result["id"].as_str().unwrap();
         let copy:(String,String,String,Option<i64>,Option<i64>)=sqlx::query_as("SELECT title,category,recurrence,completed_at,next_reset_at FROM tasks WHERE id=? AND owner_sub='b'").bind(root).fetch_one(&db).await?;
         assert_eq!((&copy.0,&copy.1,&copy.2),(&"Parent".to_string(),&"maison".to_string(),&"weekly".to_string()));assert!(copy.3.is_none()&&copy.4.is_some());
         let child:(String,String)=sqlx::query_as("SELECT title,category FROM tasks WHERE owner_sub='b' AND parent_id=?").bind(root).fetch_one(&db).await?;assert_eq!(child,("Enfant".into(),"courses".into()));
+        let Json(again)=preview_share(State(state.clone()),Path(token.clone()),headers(&tb)).await.map_err(|_|anyhow::anyhow!("preview failed"))?;assert_eq!(again["already_imported"],true);
         let Json(nested)=import_share(State(state.clone()),Path(token.clone()),headers(&tb),Json(ShareImportInput{parent_id:Some(root.into()),new_parent_title:None})).await.map_err(|_|anyhow::anyhow!("nested import failed"))?;
         let parent:Option<String>=sqlx::query_scalar("SELECT parent_id FROM tasks WHERE id=?").bind(nested["id"].as_str().unwrap()).fetch_one(&db).await?;assert_eq!(parent.as_deref(),Some(root));
-        let Json(created)=import_share(State(state),Path(token),headers(&tb),Json(ShareImportInput{parent_id:None,new_parent_title:Some(" Nouveau ".into())})).await.map_err(|_|anyhow::anyhow!("new parent import failed"))?;
+        let Json(created)=import_share(State(state.clone()),Path(token.clone()),headers(&tb),Json(ShareImportInput{parent_id:None,new_parent_title:Some(" Nouveau ".into())})).await.map_err(|_|anyhow::anyhow!("new parent import failed"))?;
         let title:String=sqlx::query_scalar("SELECT p.title FROM tasks t JOIN tasks p ON p.id=t.parent_id WHERE t.id=?").bind(created["id"].as_str().unwrap()).fetch_one(&db).await?;assert_eq!(title,"Nouveau");
+        assert!(revoke_share(State(state.clone()),Path(digest(&token)),headers(&tb)).await.is_err());
+        revoke_share(State(state.clone()),Path(digest(&token)),headers(&ta)).await.map_err(|_|anyhow::anyhow!("revoke failed"))?;
+        assert!(preview_share(State(state),Path(token),headers(&tb)).await.is_err());
         Ok(())
     }
     #[tokio::test]
@@ -572,6 +648,77 @@ mod tests {
         cleanup(&db).await?;
         let titles:Vec<String>=sqlx::query_scalar("SELECT title FROM activity WHERE owner_sub='a'").fetch_all(&db).await?;
         assert_eq!(titles,vec!["recent"]);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn upcoming_activity_matches_protection_cascades_and_user_scope() -> Result<()> {
+        let db=SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await?;init_db(&db).await?;
+        sqlx::query("INSERT INTO users(sub,name) VALUES ('a','A'),('b','B')").execute(&db).await?;
+        let now=Timestamp::now().as_second();
+        for (id,owner,parent,recurrence,completed,reset) in [
+            ("ancestor","a",None,"none",Some(now-90000),None),
+            ("recurring","a",Some("ancestor"),"weekly",None,Some(now+600)),
+            ("nested-recurring","a",Some("recurring"),"daily",None,Some(now+300)),
+            ("protected-child","a",Some("nested-recurring"),"none",Some(now-90000),None),
+            ("sibling","a",Some("ancestor"),"none",Some(now-500),None),
+            ("parent","a",None,"none",Some(now-90000),None),
+            ("child","a",Some("parent"),"none",None,None),
+            ("grandchild","a",Some("child"),"none",None,None),
+            ("early-child","a",Some("parent"),"none",Some(now-90100),None),
+            ("z-parent","a",None,"none",Some(now-10),None),
+            ("a-child","a",Some("z-parent"),"none",Some(now-10),None),
+            ("other-user","b",None,"none",Some(now-90000),None),
+        ] {
+            sqlx::query("INSERT INTO tasks(id,owner_sub,parent_id,title,recurrence,completed_at,next_reset_at,created_at) VALUES (?,?,?,?,?,?,?,?)")
+                .bind(id).bind(owner).bind(parent).bind(id).bind(recurrence).bind(completed).bind(reset).bind(now-100000).execute(&db).await?;
+        }
+        let token="a".repeat(43);
+        sqlx::query("INSERT INTO sessions(token_hash,user_sub,expires_at) VALUES (?,'a',?)").bind(digest(&token)).bind(now+60).execute(&db).await?;
+        let state=Arc::new(AppState{db:db.clone(),http:reqwest::Client::new(),oidc:Discovery{issuer:String::new(),authorization_endpoint:String::new(),token_endpoint:String::new(),jwks_uri:String::new()},issuer:String::new(),client_id:String::new(),client_secret:String::new(),public_url:String::new()});
+        let mut headers=HeaderMap::new();headers.insert(header::COOKIE,HeaderValue::from_str(&format!("todo_session={token}"))?);
+        assert!(list_upcoming_activity(State(state.clone()),HeaderMap::new()).await.is_err());
+        let Json(plan)=list_upcoming_activity(State(state),headers).await.map_err(|_|anyhow::anyhow!("upcoming activity failed"))?;
+        let events=plan["events"].as_array().unwrap();assert_eq!(events.len(),6);
+        let event=|id:&str|events.iter().find(|event|event["task_id"]==id).unwrap();
+        assert_eq!(event("recurring")["scheduled_at"],now+600);assert_eq!(event("recurring")["affected_count"],0);
+        assert_eq!(event("nested-recurring")["affected_count"],1);
+        assert_eq!(event("early-child")["affected_count"],1);assert_eq!(event("parent")["affected_count"],3);
+        assert_eq!(event("z-parent")["affected_count"],2);assert_eq!(event("sibling")["affected_count"],1);
+        for id in ["ancestor","protected-child","a-child","other-user"] {assert!(!events.iter().any(|event|event["task_id"]==id));}
+        assert!(events.windows(2).all(|pair|pair[0]["scheduled_at"].as_i64()<=pair[1]["scheduled_at"].as_i64()));
+        // La consultation ne change ni les tâches ni l'historique.
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM tasks").fetch_one(&db).await?,12);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM activity").fetch_one(&db).await?,0);
+        let planned_deletions:i64=events.iter().filter(|event|event["kind"]=="deleted"&&event["scheduled_at"].as_i64().unwrap()<=now).map(|event|event["affected_count"].as_i64().unwrap()).sum();
+        cleanup(&db).await?;
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM activity WHERE owner_sub='a' AND kind='deleted'").fetch_one(&db).await?,planned_deletions);
+        sqlx::query("UPDATE tasks SET next_reset_at=? WHERE id='recurring'").bind(now-1).execute(&db).await?;
+        sqlx::query("UPDATE tasks SET next_reset_at=? WHERE id='nested-recurring'").bind(now-2).execute(&db).await?;
+        cleanup(&db).await?;
+        let resets:Vec<String>=sqlx::query_scalar("SELECT title FROM activity WHERE owner_sub='a' AND kind='reset'").fetch_all(&db).await?;
+        assert_eq!(resets,vec!["nested-recurring"]);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn expired_shares_cannot_be_previewed_or_imported() -> Result<()> {
+        let db=SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await?;init_db(&db).await?;
+        sqlx::query("INSERT INTO users(sub,name) VALUES ('a','A')").execute(&db).await?;
+        sqlx::query("INSERT INTO tasks(id,owner_sub,title,created_at) VALUES ('task','a','Titre',0)").execute(&db).await?;
+        let token="a".repeat(43);let now=Timestamp::now().as_second();
+        sqlx::query("INSERT INTO sessions(token_hash,user_sub,expires_at) VALUES (?,'a',?)").bind(digest(&token)).bind(now+60).execute(&db).await?;
+        let state=Arc::new(AppState{db:db.clone(),http:reqwest::Client::new(),oidc:Discovery{issuer:String::new(),authorization_endpoint:String::new(),token_endpoint:String::new(),jwks_uri:String::new()},issuer:String::new(),client_id:String::new(),client_secret:String::new(),public_url:String::new()});
+        let mut headers=HeaderMap::new();headers.insert(header::COOKIE,HeaderValue::from_str(&format!("todo_session={token}"))?);headers.insert("x-todo-request",HeaderValue::from_static("1"));
+        assert!(create_share(State(state.clone()),Path("task".into()),headers.clone(),Json(ShareOptions{duration_seconds:Some(-1)})).await.is_err());
+        let Json(link)=create_share(State(state.clone()),Path("task".into()),headers.clone(),Json(ShareOptions{duration_seconds:Some(86400)})).await.map_err(|_|anyhow::anyhow!("share failed"))?;
+        assert!(link["expires_at"].as_i64().unwrap()>=now+86400);
+        let shared=link["token"].as_str().unwrap();
+        sqlx::query("UPDATE shared_tasks SET expires_at=?").bind(now-1).execute(&db).await?;
+        let error=preview_share(State(state.clone()),Path(shared.into()),headers.clone()).await.unwrap_err();
+        assert_eq!(error.0,StatusCode::NOT_FOUND);
+        assert!(import_share(State(state.clone()),Path(shared.into()),headers.clone(),Json(ShareImportInput::default())).await.is_err());
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM tasks").fetch_one(&db).await?,1);
+        let Json(links)=list_shares(State(state),headers).await.map_err(|_|anyhow::anyhow!("list shares failed"))?;
+        assert_eq!(links.len(),1);assert_eq!(links[0]["expires_at"],now-1);
         Ok(())
     }
 }
@@ -602,10 +749,13 @@ async fn main()->Result<()> {
       .route("/auth/login",get(auth_login)).route("/auth/callback",get(auth_callback)).route("/auth/logout",get(auth_logout))
       .route("/api/tasks",get(list_tasks).post(create_task))
       .route("/api/activity",get(list_activity))
+      .route("/api/activity/upcoming",get(list_upcoming_activity))
       .route("/api/tasks/{id}",axum::routing::patch(edit_task).delete(delete_task))
       .route("/api/tasks/{id}/category",axum::routing::patch(set_category))
       .route("/api/tasks/{id}/share",post(create_share))
       .route("/api/shares/{token}",get(preview_share).post(import_share))
+      .route("/api/shares",get(list_shares))
+      .route("/api/shares/manage/{id}",axum::routing::delete(revoke_share))
       .route("/api/tasks/{id}/check",post(check_task)).route("/api/tasks/{id}/move",post(move_task)).route("/api/tasks/{id}/position",post(position_task))
       .with_state(s);
     let listener=tokio::net::TcpListener::bind(("0.0.0.0",port)).await?;
