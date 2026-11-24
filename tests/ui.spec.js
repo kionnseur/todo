@@ -4,6 +4,18 @@ function task(id, title, parentId = null, category = '') {
   return { id, title, parent_id: parentId, description: '', category, category_color: '0', recurrence: 'none', sort_order: 0, completed_at: null, next_reset_at: null, created_at: 1 };
 }
 
+async function touchSwipe(page, x, y, dx, dy) {
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+    for (let step = 1; step <= 10; step++) {
+      await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + dx * step / 10, y: y + dy * step / 10 }] });
+      await page.waitForTimeout(16);
+    }
+    await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  } finally { await session.detach(); }
+}
+
 function mockApi(context, state) {
   return context.route('**/api/**', async route => {
     const request = route.request();
@@ -519,4 +531,104 @@ test('centrer les pictogrammes de recherche et de partage sur mobile et ordinate
       })).toBeLessThanOrEqual(0.5);
     }
   }
+});
+
+test('garder le scroll PC naturel sans animation des tâches ni calage après arrêt', async ({ page, context }) => {
+  await page.setViewportSize({ width: 1280, height: 600 });
+  await mockApi(context, { tasks: Array.from({ length: 40 }, (_, i) => task(`task-${i}`, `Tâche ${i}`, null, i % 3 ? '' : 'maison')) });
+  await page.goto('/');
+  await page.addStyleTag({ content: '.task{border:3px solid #e5e8ef;margin:5px 0}' });
+  await expect(page.locator('.task')).toHaveCount(40);
+  await page.mouse.move(640, 400);
+  // Trois crans rapprochés doivent défiler librement, sans arrêt à chaque tâche.
+  for (let i = 0; i < 3; i++) { await page.mouse.wheel(0, 120); await page.waitForTimeout(30); }
+  expect(await page.evaluate(() => scrollY)).toBe(360);
+  await page.waitForTimeout(350);
+  expect(await page.evaluate(() => scrollY)).toBe(360);
+  await page.mouse.wheel(0, -73);
+  await page.waitForTimeout(350);
+  expect(await page.evaluate(() => scrollY)).toBe(287);
+  expect(await page.locator('.task').evaluateAll(nodes => nodes.every(node => {
+    const style = getComputedStyle(node);
+    return node.getAnimations().length === 0 && style.transform === 'none' && style.clipPath === 'none' && style.opacity === '1';
+  }))).toBe(true);
+});
+
+test('ne pas rappeler la liste après avoir dépassé sa dernière tâche', async ({ page, context }) => {
+  await page.setViewportSize({ width: 1280, height: 600 });
+  await mockApi(context, { tasks: Array.from({ length: 40 }, (_, i) => task(`task-${i}`, `Tâche ${i}`)) });
+  await page.goto('/');
+  await page.locator('[data-id="task-39"]').waitFor();
+  const max = await page.evaluate(() => document.documentElement.scrollHeight - innerHeight);
+  await page.evaluate(y => window.scrollTo(0, y), max - 30);
+  await page.mouse.move(640, 400);
+  await page.mouse.wheel(0, 15);
+  await page.waitForTimeout(350);
+  expect(await page.evaluate(() => scrollY)).toBe(max - 15);
+});
+
+test('garder le scroll mobile naturel sans déplacement horizontal avec une liste enfant', async ({ page, context }) => {
+  await page.setViewportSize({ width: 390, height: 600 });
+  await mockApi(context, { tasks: [task('parent', 'Parent'), task('child', 'Enfant', 'parent'), ...Array.from({ length: 40 }, (_, i) => task(`task-${i}`, `Tâche ${i}`))] });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Parent', exact: true }).click();
+  await page.mouse.move(180, 450);
+  await page.mouse.wheel(0, 73);
+  await page.waitForTimeout(350);
+  expect(await page.evaluate(() => scrollY)).toBe(73);
+  expect(await page.locator('.levels-track').evaluate(track => track.scrollLeft)).toBe(0);
+  expect(await page.locator('.task').evaluateAll(nodes => nodes.every(node => getComputedStyle(node).transform === 'none' && getComputedStyle(node).clipPath === 'none' && node.getAnimations().length === 0))).toBe(true);
+});
+
+test('respecter le scroll naturel quand les mouvements sont réduits', async ({ page, context }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await mockApi(context, { tasks: Array.from({ length: 40 }, (_, i) => task(`task-${i}`, `Tâche ${i}`)) });
+  await page.goto('/');
+  await page.mouse.move(640, 450);
+  await page.mouse.wheel(0, 73);
+  await page.waitForTimeout(350);
+  expect(await page.evaluate(() => scrollY)).toBe(73);
+  expect(await page.locator('.task').evaluateAll(nodes => nodes.every(node => getComputedStyle(node).transform === 'none'))).toBe(true);
+});
+
+test('balayer les pages sur mobile sans changer de page pendant un geste vertical', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 600 }, hasTouch: true, isMobile: true });
+  try {
+    await mockApi(context, { tasks: [task('parent', 'Parent'), ...Array.from({ length: 30 }, (_, i) => task(`root-${i}`, `Racine ${i}`)), ...Array.from({ length: 30 }, (_, i) => task(`child-${i}`, `Enfant ${i}`, 'parent'))] });
+    const page = await context.newPage();
+    await page.goto('http://127.0.0.1:4187/');
+    await page.getByRole('button', { name: 'Parent', exact: true }).tap();
+    // Un geste de moins d'une demi-page doit rester sur la page de destination.
+    await touchSwipe(page, 280, 450, -70, 4);
+    await expect(page.getByRole('button', { name: 'Page 2', exact: true })).toHaveAttribute('aria-current', 'page');
+    await page.waitForTimeout(450);
+    await expect(page.getByRole('button', { name: 'Page 2', exact: true })).toHaveAttribute('aria-current', 'page');
+    const horizontal = await page.locator('.levels-track').evaluate(track => track.scrollLeft);
+    await touchSwipe(page, 180, 450, 12, -180);
+    await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(50);
+    await page.waitForTimeout(250);
+    expect(Math.abs(await page.locator('.levels-track').evaluate(track => track.scrollLeft) - horizontal)).toBeLessThanOrEqual(1);
+    await touchSwipe(page, 100, 350, 70, -4);
+    await expect(page.getByRole('button', { name: 'Page 1', exact: true })).toHaveAttribute('aria-current', 'page');
+    await page.waitForTimeout(450);
+    await expect(page.getByRole('button', { name: 'Page 1', exact: true })).toHaveAttribute('aria-current', 'page');
+  } finally { await context.close(); }
+});
+
+test('conserver la destination des petits balayages vers une page mobile plus courte', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 600 }, hasTouch: true, isMobile: true });
+  try {
+    await mockApi(context, { tasks: [task('parent', 'Parent'), task('child', 'Enfant', 'parent'), ...Array.from({ length: 30 }, (_, i) => task(`root-${i}`, `Racine ${i}`))] });
+    const page = await context.newPage();
+    await page.goto('http://127.0.0.1:4187/');
+    await page.getByRole('button', { name: 'Parent', exact: true }).tap();
+    for (const dx of [-70, 70, -40, 40]) {
+      await touchSwipe(page, 190, 250, dx, 2);
+      const destination = page.getByRole('button', { name: dx < 0 ? 'Page 2' : 'Page 1', exact: true });
+      await expect(destination).toHaveAttribute('aria-current', 'page');
+      await page.waitForTimeout(450);
+      await expect(destination).toHaveAttribute('aria-current', 'page');
+      await expect(page.locator('.levels-track')).not.toHaveClass(/is-swiping/);
+    }
+  } finally { await context.close(); }
 });

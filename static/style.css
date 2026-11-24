@@ -30,7 +30,7 @@
 .levels-track{position:relative;display:flex;align-items:flex-start;gap:16px;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x mandatory;scrollbar-width:none}
 .levels-track::-webkit-scrollbar{display:none}
 .mode-3 .levels-track{padding:0 max(calc((100% - 750px)/2),5%);scroll-padding:0 max(calc((100% - 750px)/2),5%)}
-.level-page{position:relative;background:#fff;border:1px solid #e5e8ef;border-radius:16px;padding:14px;min-width:0;scroll-snap-align:center;animation:page-enter .22s ease-out}
+.level-page{position:relative;background:#fff;border:1px solid #e5e8ef;border-radius:16px;padding:14px;min-width:0;scroll-snap-align:center}
 .mode-3 .level-page{flex:0 0 100%}
 .level-page .task-row{min-width:0}
 .level-page .details-description{margin-bottom:8px}
@@ -51,7 +51,8 @@
 .arrow-spacer{width:26px;flex:none}
 .task .task-row .twisty,.task.open>.task-row .twisty{transform:none}
 .task .task-row .points-right .twisty,.task.open>.task-row .points-right .twisty{transform:rotate(90deg)}
-@media(max-width:650px){.wrap:has(.mode-3){padding:12px 10px 48px}.topbar{flex-wrap:wrap;gap:10px;margin-bottom:16px}.mode-3 .levels-track{padding:0;scroll-padding:0}}
+.levels-track.is-swiping{scroll-snap-type:none}
+@media(max-width:650px){.wrap:has(.mode-3){padding:12px 10px 48px}.topbar{flex-wrap:wrap;gap:10px;margin-bottom:16px}.mode-3 .levels-track{padding:0;scroll-padding:0;touch-action:pan-y pinch-zoom;overscroll-behavior-x:contain}}
 @media(max-width:480px){.form-grid{grid-template-columns:1fr}.heading{padding:18px 12px 14px;gap:6px}.heading-actions{gap:4px}.view-action{width:34px;height:36px}.heading .new{padding:9px;font-size:12px}}
 /* Contrôles de la liste et indicateurs accessibles. */
 .level-page{box-shadow:none}
@@ -87,7 +88,6 @@
 .iconbtn,.view-action,.new,.primary,.muted,.quick-add button{transition:background-color .18s ease,color .18s ease,transform .15s ease}
 .iconbtn:active,.view-action:active,.new:active,.primary:active,.muted:active,.quick-add button:active{transform:scale(.96)}
 .check:checked::after{animation:check-enter .18s ease-out}
-@keyframes page-enter{from{opacity:0}to{opacity:1}}
 @keyframes details-enter{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 @keyframes menu-enter{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:scale(1)}}
 @keyframes check-enter{from{opacity:0;transform:scale(.65)}to{opacity:1;transform:scale(1)}}

@@ -178,8 +178,47 @@ function updateTrackHeight(){
 }
 const pageResize=new ResizeObserver(()=>{alignCarouselPages();updateTrackHeight();if(menuId)positionTaskMenu()});
 function observePages(){pageResize.disconnect();root.querySelectorAll('.level-page').forEach(page=>pageResize.observe(page))}
-function scrollToPage(index,behavior='smooth'){const track=root.querySelector('.levels-track'),page=track?.children[index];if(!track||!page)return;const a=track.getBoundingClientRect(),b=page.getBoundingClientRect();track.scrollBy({left:b.left+b.width/2-(a.left+track.clientWidth/2),behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':behavior})}
-window.addEventListener('resize',()=>{alignCarouselPages();scrollToPage(carouselLevel,'instant');updateTrackHeight();if(menuId)positionTaskMenu()});
+let taskSwipe=null,carouselTarget=null,carouselSettleTimer;
+// Verrouiller l'axe dès le début du geste : défilement vertical natif, swipe horizontal volontaire.
+root.addEventListener('touchstart',e=>{
+  if(e.touches.length!==1)return;
+  const track=e.target.closest('.levels-track');if(!track)return;
+  clearTimeout(carouselSettleTimer);carouselTarget=null;track.classList.add('is-swiping');track.scrollTo({left:track.scrollLeft,behavior:'instant'});
+  const touch=e.touches[0];taskSwipe={track,id:touch.identifier,x:touch.clientX,y:touch.clientY,left:track.scrollLeft,level:carouselLevel,started:performance.now(),axis:null,dx:0};
+},{passive:true});
+root.addEventListener('touchmove',e=>{
+  if(!taskSwipe)return;
+  if(e.touches.length!==1){finishTaskSwipe(true);return}
+  const touch=[...e.touches].find(touch=>touch.identifier===taskSwipe.id);if(!touch)return;
+  const dx=touch.clientX-taskSwipe.x,dy=touch.clientY-taskSwipe.y;
+  if(!taskSwipe.axis&&Math.max(Math.abs(dx),Math.abs(dy))>9)taskSwipe.axis=Math.abs(dx)>Math.abs(dy)*1.5?'x':'y';
+  if(taskSwipe.axis!=='x')return;
+  e.preventDefault();taskSwipe.dx=dx;taskSwipe.track.scrollLeft=taskSwipe.left-dx;
+},{passive:false});
+function finishTaskSwipe(cancelled=false){
+  if(!taskSwipe)return;
+  const swipe=taskSwipe;taskSwipe=null;
+  if(swipe.axis==='x'){const distance=Math.abs(swipe.dx),flick=distance>12&&distance/Math.max(1,performance.now()-swipe.started)>.4,step=!cancelled&&(distance>Math.min(36,swipe.track.clientWidth*.1)||flick)?-Math.sign(swipe.dx):0;scrollToPage(Math.max(0,Math.min(swipe.track.children.length-1,swipe.level+step)))}
+  else swipe.track.classList.remove('is-swiping');
+}
+root.addEventListener('touchend',e=>{const touch=taskSwipe&&[...e.changedTouches].find(touch=>touch.identifier===taskSwipe.id);if(touch)taskSwipe.dx=touch.clientX-taskSwipe.x;finishTaskSwipe()},{passive:true});
+root.addEventListener('touchcancel',()=>finishTaskSwipe(true),{passive:true});
+function settleCarousel(){
+  if(!carouselTarget||taskSwipe)return;
+  const {track,left}=carouselTarget;
+  if(Math.abs(track.scrollLeft-left)>1)track.scrollTo({left,behavior:'instant'});
+  carouselTarget=null;track.classList.remove('is-swiping');
+}
+function scrollToPage(index,behavior='smooth'){
+  const track=root.querySelector('.levels-track'),page=track?.children[index];if(!track||!page)return;
+  const left=Math.max(0,Math.min(track.scrollWidth-track.clientWidth,page.offsetLeft+(page.offsetWidth-track.clientWidth)/2));
+  clearTimeout(carouselSettleTimer);track.classList.add('is-swiping');carouselTarget={track,left};
+  const instant=behavior==='instant'||matchMedia('(prefers-reduced-motion: reduce)').matches;
+  track.scrollTo({left,behavior:instant?'instant':behavior});
+  if(instant)settleCarousel();else carouselSettleTimer=setTimeout(settleCarousel,140);
+}
+root.addEventListener('scroll',e=>{if(e.target===carouselTarget?.track){clearTimeout(carouselSettleTimer);carouselSettleTimer=setTimeout(settleCarousel,140)}},true);
+window.addEventListener('resize',()=>{alignCarouselPages();updateTrackHeight();if(menuId)positionTaskMenu()});
 window.addEventListener('popstate',e=>{if(e.state?.todoNavigation!==navigationId)return;clearTimeout(scrollHistoryTimer);const last=Math.max(0,(root.querySelector('.levels-track')?.children.length||1)-1);historyLevel=Math.min(e.state.todoLevel||0,last);restoringHistory=true;scrollToPage(historyLevel);setTimeout(()=>{restoringHistory=false},700)});
 // Les tâches et les pages conservent leur élément DOM entre deux rendus.
 function nodeKey(node){if(node.nodeType!==Node.ELEMENT_NODE)return null;if(node.classList.contains('heading'))return 'heading';if(node.classList.contains('quick-add'))return 'quick-add';if(node.classList.contains('task'))return `task:${node.dataset.id}`;if(node.classList.contains('level-page'))return `page:${node.dataset.level}`;return null}
@@ -201,7 +240,7 @@ function render(){const scrollY=window.scrollY;document.getElementById('count').
 if(window.scrollY!==scrollY)window.scrollTo({top:scrollY,behavior:'instant'});
 }
 // Reconstruire les index ensemble après chaque chargement de la liste.
-function refreshSafe(){const active=document.activeElement;return !document.hidden&&!mutationCount&&modal.classList.contains('hidden')&&activityOverlay.classList.contains('hidden')&&categoryOverlay.classList.contains('hidden')&&searchOverlay.classList.contains('hidden')&&shareOverlay.classList.contains('hidden')&&!menuId&&!(root.contains(active)&&active.matches('input,textarea,select,[contenteditable]'))&&!document.querySelector(':active.task-row')}
+function refreshSafe(){const active=document.activeElement;return !document.hidden&&!mutationCount&&!taskSwipe&&!carouselTarget&&modal.classList.contains('hidden')&&activityOverlay.classList.contains('hidden')&&categoryOverlay.classList.contains('hidden')&&searchOverlay.classList.contains('hidden')&&shareOverlay.classList.contains('hidden')&&!menuId&&!(root.contains(active)&&active.matches('input,textarea,select,[contenteditable]'))&&!document.querySelector(':active.task-row')}
 async function refresh(background=false){if(background&&!refreshSafe())return;const seq=++refreshSeq,version=interactionVersion;const incoming=await api('/api/tasks');if(seq!==refreshSeq||mutationCount||(background&&(!refreshSafe()||version!==interactionVersion)))return;if(background&&JSON.stringify(incoming)===JSON.stringify(tasks)){updateTaskAges();return}tasks=incoming;tasksById=new Map();childrenByParent=new Map();for(const task of tasks){tasksById.set(task.id,task);const siblings=childrenByParent.get(task.parent_id)||[];siblings.push(task);childrenByParent.set(task.parent_id,siblings)}rebuildSearchIndex();if(selected&&!tasksById.has(selected))selected=null;render()}
 async function initialize(){await refresh();const token=sessionStorage.getItem('todoPendingShare');if(token)await showSharePreview(token)}
 window.addEventListener('hashchange',()=>{const token=captureShareLink();if(token)showSharePreview(token)});
