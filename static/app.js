@@ -75,14 +75,14 @@ function closeShare(){shareRequest++;shareOverlay.classList.add('hidden');sessio
 shareOverlay.querySelector('.iconbtn').onclick=closeShare;shareOverlay.onclick=e=>{if(e.target===shareOverlay)closeShare()};
 function showShareLink(task){
   const request=beginShare('Partager la tâche');shareContent.setAttribute('aria-busy','false');
-  shareContent.innerHTML=`<p>Partager une copie figée de <strong>${esc(task.title)}</strong> et de ses sous-tâches. Les modifications ultérieures ne seront pas synchronisées.</p><label class="field">Durée de validité<select class="fieldinput share-duration"><option value="86400">1 jour</option><option value="604800">1 semaine</option><option value="">Sans expiration</option></select></label>`;
+  shareContent.innerHTML=`<p>Choisis comment partager <strong>${esc(task.title)}</strong> et ses sous-tâches.</p><label class="field">Type de partage<select class="fieldinput share-mode"><option value="live">Liste synchronisée</option><option value="copy">Copie indépendante</option></select></label><label class="field">Durée de validité<select class="fieldinput share-duration"><option value="86400">1 jour</option><option value="604800">1 semaine</option><option value="">Sans expiration</option></select></label>`;
   shareActions.innerHTML='<button type="button" class="muted">Annuler</button><button type="button" class="primary">Créer le lien</button>';shareActions.querySelector('.muted').onclick=closeShare;
   shareActions.querySelector('.primary').onclick=async e=>{
-    const button=e.currentTarget,duration=shareContent.querySelector('.share-duration').value;button.disabled=true;
+    const button=e.currentTarget,duration=shareContent.querySelector('.share-duration').value,mode=shareContent.querySelector('.share-mode').value;button.disabled=true;
     try{
-      const result=await api(`/api/tasks/${encodeURIComponent(task.id)}/share`,{method:'POST',body:JSON.stringify({duration_seconds:duration?Number(duration):null})});if(request!==shareRequest)return;
+      const result=await api(`/api/tasks/${encodeURIComponent(task.id)}/share`,{method:'POST',body:JSON.stringify({duration_seconds:duration?Number(duration):null,mode})});if(request!==shareRequest)return;
       const url=new URL('/',location.origin);url.hash=`partage=${result.token}`;
-      shareContent.innerHTML=`<p>Le lien est prêt. Toute personne connectée qui le reçoit pourra importer cette copie.</p><input class="fieldinput share-link" readonly aria-label="Lien de partage"><p class="share-expiry">${result.expires_at?`Expire le ${esc(activityDate(result.expires_at))}.`:'Sans expiration automatique.'}</p>`;
+      shareContent.innerHTML=`<p>Le lien est prêt. ${result.live?'Les personnes qui l’ouvrent auront accès à la liste synchronisée.':'Une copie indépendante sera proposée aux personnes qui l’ouvrent.'}</p><input class="fieldinput share-link" readonly aria-label="Lien de partage"><p class="share-expiry">${result.expires_at?`Expire le ${esc(activityDate(result.expires_at))}.`:'Sans expiration automatique.'}</p>`;
       const input=shareContent.querySelector('input');input.value=url.href;shareActions.innerHTML='<button type="button" class="primary share-copy">Copier le lien</button>';
       shareActions.querySelector('.share-copy').onclick=async()=>{try{await navigator.clipboard.writeText(input.value);notify('Lien copié')}catch{input.focus();input.select();notify('Sélectionne et copie le lien')}};
       if(typeof navigator.share==='function'){
@@ -98,14 +98,14 @@ async function showSharedLinks(){
   const request=beginShare('Liens de partage');
   try{
     const links=await api('/api/shares');if(request!==shareRequest)return;
-    shareContent.innerHTML='<p>Ces liens donnent accès à une copie figée des tâches. Désactiver un lien empêche de nouveaux imports, sans supprimer les copies déjà importées.</p>';
+    shareContent.innerHTML='<p>Désactiver une liste synchronisée retire l’accès partagé. Désactiver une copie indépendante empêche les nouveaux imports ; les copies déjà importées sont conservées.</p>';
     shareContent.insertAdjacentHTML('beforeend',links.length?'<div class="share-list managed-shares"></div>':'<p class="modal-empty">Aucun lien de partage. Utilise « Partager » dans le menu d’une tâche pour en créer un.</p>');
     const list=shareContent.querySelector('.share-list');
     for(const link of links){
       const expired=link.expires_at!=null&&link.expires_at*1000<=Date.now(),item=document.createElement('article');item.className='share-item share-managed';item.dataset.shareId=link.id;
-      item.innerHTML=`<div class="share-managed-info"><div class="share-managed-heading"><strong>${esc(link.title||'Tâche partagée')}</strong><span class="share-status ${expired?'is-expired':''}">${expired?'Expiré':'Actif'}</span></div>${link.created_at>0?`<small>Créé le ${esc(activityDate(link.created_at))}</small>`:''}<small>${link.expires_at!=null?`${expired?'Expiré':'Expire'} le ${esc(activityDate(link.expires_at))}`:'Sans expiration'}</small>${Number.isInteger(link.task_count)?`<small>${link.task_count} tâche${link.task_count>1?'s':''} dans la copie</small>`:''}</div><button type="button" class="muted">${expired?'Supprimer':'Désactiver'}</button>`;
+      item.innerHTML=`<div class="share-managed-info"><div class="share-managed-heading"><strong>${esc(link.title||'Tâche partagée')}</strong><span class="share-status ${expired?'is-expired':''}">${expired?'Expiré':'Actif'}</span></div><small>${link.live?'Liste synchronisée':'Copie indépendante'}</small>${link.created_at>0?`<small>Créé le ${esc(activityDate(link.created_at))}</small>`:''}<small>${link.expires_at!=null?`${expired?'Expiré':'Expire'} le ${esc(activityDate(link.expires_at))}`:'Sans expiration'}</small>${!link.live&&Number.isInteger(link.task_count)?`<small>${link.task_count} tâche${link.task_count>1?'s':''} dans la copie</small>`:''}</div><button type="button" class="muted">${expired?'Supprimer':'Désactiver'}</button>`;
       item.querySelector('button').onclick=async e=>{
-        if(!confirm(expired?'Supprimer ce lien expiré de la liste ?':'Désactiver ce lien de partage ? Les copies déjà importées seront conservées.'))return;
+        if(!confirm(expired?'Supprimer ce lien expiré de la liste ?':link.live?'Désactiver ce lien de partage ? L’accès à la liste synchronisée sera retiré.':'Désactiver ce lien de partage ? Les copies déjà importées seront conservées.'))return;
         const button=e.currentTarget;button.disabled=true;
         try{await api(`/api/shares/manage/${encodeURIComponent(link.id)}`,{method:'DELETE'});if(request===shareRequest){await showSharedLinks();notify(expired?'Lien expiré supprimé':'Lien désactivé')}}catch(error){if(request===shareRequest){notify(error.message);button.disabled=false}}
       };
@@ -116,19 +116,25 @@ async function showSharedLinks(){
 }
 manageSharesButton.onclick=showSharedLinks;
 async function showSharePreview(token){
-  const request=beginShare('Importer les tâches');
+  const request=beginShare('Liste partagée');
   try{
     const preview=await api(`/api/shares/${encodeURIComponent(token)}`);if(request!==shareRequest)return;const shared=preview.tasks,depths=new Map();
-    shareContent.innerHTML='<p>Une copie de ces tâches sera ajoutée à ta liste, sans les cocher.</p><label class="field">Importer sous<select class="fieldinput share-destination"><option value="">À la racine</option><option value="__new__">Créer une nouvelle tâche parente…</option></select></label><label class="field share-new-parent hidden">Nom de la nouvelle tâche parente<input class="fieldinput" maxlength="160"></label><div class="share-list"></div>';
-    if(preview.already_imported){const warning=document.createElement('p');warning.className='share-warning';warning.textContent='Tu as déjà importé ce partage. Tu peux l’ajouter à nouveau.';shareContent.prepend(warning)}
-    const select=shareContent.querySelector('.share-destination'),newParent=shareContent.querySelector('.share-new-parent'),parentInput=newParent.querySelector('input');
-    const choices=tasks.map(task=>{const path=[task.title];let parent=tasksById.get(task.parent_id);while(parent){path.unshift(parent.title);parent=tasksById.get(parent.parent_id)}return {id:task.id,label:path.join(' › ')}}).sort((a,b)=>a.label.localeCompare(b.label));
-    for(const choice of choices){const option=document.createElement('option');option.value=choice.id;option.textContent=choice.label;select.append(option)}
-    select.onchange=()=>{newParent.classList.toggle('hidden',select.value!=='__new__');parentInput.setCustomValidity('');if(select.value==='__new__')parentInput.focus()};parentInput.oninput=()=>parentInput.setCustomValidity('');
+    if(!preview.live){
+      shareTitle.textContent='Importer les tâches';
+      shareContent.innerHTML='<p>Une copie indépendante sera ajoutée à ta liste. Ses coches ne seront pas synchronisées avec la liste d’origine.</p><label class="field">Importer sous<select class="fieldinput share-destination"><option value="">À la racine</option><option value="__new__">Créer une nouvelle tâche parente…</option></select></label><label class="field share-new-parent hidden">Nom de la nouvelle tâche parente<input class="fieldinput" maxlength="160"></label><div class="share-list"></div>';
+      if(preview.already_imported){const warning=document.createElement('p');warning.className='share-warning';warning.textContent='Tu as déjà importé ce partage. Tu peux l’ajouter à nouveau.';shareContent.prepend(warning)}
+      const select=shareContent.querySelector('.share-destination'),newParent=shareContent.querySelector('.share-new-parent'),parentInput=newParent.querySelector('input');
+      const choices=tasks.map(task=>{const path=[task.title];let parent=tasksById.get(task.parent_id);while(parent){path.unshift(parent.title);parent=tasksById.get(parent.parent_id)}return {id:task.id,label:path.join(' › ')}}).sort((a,b)=>a.label.localeCompare(b.label));
+      for(const choice of choices){const option=document.createElement('option');option.value=choice.id;option.textContent=choice.label;select.append(option)}
+      select.onchange=()=>{newParent.classList.toggle('hidden',select.value!=='__new__');parentInput.setCustomValidity('');if(select.value==='__new__')parentInput.focus()};parentInput.oninput=()=>parentInput.setCustomValidity('');
+      const list=shareContent.querySelector('.share-list');for(const task of shared){const depth=task.parent_id?(depths.get(task.parent_id)||0)+1:0;depths.set(task.id,depth);const item=document.createElement('div');item.className='share-item';item.style.paddingInlineStart=`${Math.min(depth,8)*18}px`;item.innerHTML=`<strong>${esc(task.title)}</strong>${task.category?`<small>${esc(task.category)}</small>`:''}${task.recurrence&&task.recurrence!=='none'?recurrenceIcon(task.recurrence):''}${task.description?`<p>${esc(task.description)}</p>`:''}`;list.append(item)}
+      shareActions.innerHTML='<button type="button" class="muted">Annuler</button><button type="button" class="primary">Ajouter à mes tâches</button>';shareActions.querySelector('.muted').onclick=closeShare;
+      shareActions.querySelector('.primary').onclick=async e=>{const button=e.currentTarget,isNew=select.value==='__new__',title=parentInput.value.trim();if(isNew&&!title){parentInput.setCustomValidity('Saisis un titre.');parentInput.reportValidity();return}button.disabled=true;try{await api(`/api/shares/${encodeURIComponent(token)}`,{method:'POST',body:JSON.stringify(isNew?{new_parent_title:title}:{parent_id:select.value||null})});if(request===shareRequest)closeShare();await refresh();notify('Copie ajoutée')}catch(error){if(request===shareRequest){notify(error.message);button.disabled=false}}};
+      select.focus();return;
+    }
+    shareContent.innerHTML='<p>Cette liste est synchronisée. Les cases cochées sont communes aux personnes ayant accès au lien.</p><div class="share-list"></div>';
     const list=shareContent.querySelector('.share-list');for(const task of shared){const depth=task.parent_id?(depths.get(task.parent_id)||0)+1:0;depths.set(task.id,depth);const item=document.createElement('div');item.className='share-item';item.style.paddingInlineStart=`${Math.min(depth,8)*18}px`;item.innerHTML=`<strong>${esc(task.title)}</strong>${task.category?`<small>${esc(task.category)}</small>`:''}${task.recurrence&&task.recurrence!=='none'?recurrenceIcon(task.recurrence):''}${task.description?`<p>${esc(task.description)}</p>`:''}`;list.append(item)}
-    shareActions.innerHTML='<button type="button" class="muted">Annuler</button><button type="button" class="primary">Ajouter à mes tâches</button>';shareActions.querySelector('.muted').onclick=closeShare;
-    shareActions.querySelector('.primary').onclick=async e=>{const button=e.currentTarget,isNew=select.value==='__new__',title=parentInput.value.trim();if(isNew&&!title){parentInput.setCustomValidity('Saisis un titre contenant au moins un caractère.');parentInput.reportValidity();return}const destination=isNew?{new_parent_title:title}:{parent_id:select.value||null};button.disabled=true;try{await api(`/api/shares/${encodeURIComponent(token)}`,{method:'POST',body:JSON.stringify(destination)});if(request===shareRequest)closeShare();await refresh();notify('Tâches ajoutées')}catch(error){if(request===shareRequest){notify(error.message);button.disabled=false}}};
-    select.focus();
+    shareActions.innerHTML='<button type="button" class="primary">Ouvrir la liste</button>';shareActions.querySelector('button').onclick=async()=>{closeShare();await refresh();notify('Liste partagée ouverte')};shareActions.querySelector('button').focus();
   }catch(error){if(request===shareRequest)shareContent.textContent=error.message}
   finally{if(request===shareRequest)shareContent.setAttribute('aria-busy','false')}
 }
@@ -240,7 +246,7 @@ function render(){const scrollY=window.scrollY;document.getElementById('count').
 if(window.scrollY!==scrollY)window.scrollTo({top:scrollY,behavior:'instant'});
 }
 // Reconstruire les index ensemble après chaque chargement de la liste.
-function refreshSafe(){const active=document.activeElement;return !document.hidden&&!mutationCount&&!taskSwipe&&!carouselTarget&&modal.classList.contains('hidden')&&activityOverlay.classList.contains('hidden')&&categoryOverlay.classList.contains('hidden')&&searchOverlay.classList.contains('hidden')&&shareOverlay.classList.contains('hidden')&&!menuId&&!(root.contains(active)&&active.matches('input,textarea,select,[contenteditable]'))&&!document.querySelector(':active.task-row')}
+function refreshSafe(){const active=document.activeElement;return !document.hidden&&!mutationCount&&!taskSwipe&&!carouselTarget&&modal.classList.contains('hidden')&&activityOverlay.classList.contains('hidden')&&categoryOverlay.classList.contains('hidden')&&searchOverlay.classList.contains('hidden')&&shareOverlay.classList.contains('hidden')&&!menuId&&!(root.contains(active)&&active.matches('input:not([type=checkbox]),textarea,select,[contenteditable]'))&&!document.querySelector(':active.task-row')}
 async function refresh(background=false){if(background&&!refreshSafe())return;const seq=++refreshSeq,version=interactionVersion;const incoming=await api('/api/tasks');if(seq!==refreshSeq||mutationCount||(background&&(!refreshSafe()||version!==interactionVersion)))return;if(background&&JSON.stringify(incoming)===JSON.stringify(tasks)){updateTaskAges();return}tasks=incoming;tasksById=new Map();childrenByParent=new Map();for(const task of tasks){tasksById.set(task.id,task);const siblings=childrenByParent.get(task.parent_id)||[];siblings.push(task);childrenByParent.set(task.parent_id,siblings)}rebuildSearchIndex();if(selected&&!tasksById.has(selected))selected=null;render()}
 async function initialize(){await refresh();const token=sessionStorage.getItem('todoPendingShare');if(token)await showSharePreview(token)}
 window.addEventListener('hashchange',()=>{const token=captureShareLink();if(token)showSharePreview(token)});

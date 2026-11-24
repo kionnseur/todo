@@ -8,11 +8,11 @@ Les tâches récurrentes et leurs descendants sont conservés. Ils sont décoch�
 
 - Authentification OIDC via Pocket ID : Authorization Code + PKCE S256, `state` + cookie de navigateur, `nonce`, ID Token signé vérifié avec JWKS et contrôle issuer/audience/expiration.
 - Sessions de 7 jours, jetons de session opaques, hachés dans SQLite, cookies `HttpOnly; Secure; SameSite=Lax`.
-- Un espace **privé par compte Pocket ID** (`sub`). Une tâche peut être partagée par lien sous forme de copie indépendante.
+- Un espace **privé par compte Pocket ID** (`sub`). Une branche peut être partagée par lien soit comme copie indépendante, soit en accès synchronisé : dans ce dernier cas, les utilisateurs qui ouvrent le lien voient la branche originale et partagent son état coché.
 - Tâches avec titre, description optionnelle, parent optionnel et **ordre manuel** (pas de priorité).
 - Sous-tâches présentées dans un carrousel par niveau. Pas de changement de parent après création.
 - Menu « ⋯ » par tâche : modifier, partager, monter, descendre, supprimer ; bouton « + » pour ajouter un enfant.
-- Le lien de partage contient une copie figée de la tâche et de ses descendants (jusqu'à 1 000 tâches), avec descriptions, catégories et récurrences. Le destinataire connecté prévisualise et choisit une destination (racine, tâche existante ou nouvelle tâche parente) avant de confirmer l'import ; les copies sont décochées. Le créateur choisit une validité d'un jour, une semaine ou sans expiration, puis peut désactiver ses liens depuis leur liste. Les liens expirés ou désactivés ne permettent plus d'importer ; les copies déjà importées sont conservées. Un avertissement signale un partage déjà importé.
+- Le créateur choisit entre une copie indépendante et une liste synchronisée pour la tâche et ses descendants (jusqu'à 1 000 tâches), avec une validité d'un jour, d'une semaine ou sans expiration. Dans le mode synchronisé, l'état coché est commun aux utilisateurs ayant ouvert le lien ; la révocation retire immédiatement l'accès partagé. Les anciens imports restent compatibles pour les liens historiques.
 - Recherche insensible aux accents, à la casse et aux ligatures (`cœur` / `coeur`), combinant plusieurs mots du titre, de la description, de la catégorie ou du chemin parent. Les titres exacts sont affichés en premier et les résultats sont navigables au clavier.
 - Tâche terminée : grisée, titre barré. Décochage possible avant échéance.
 - Suppression automatique après 24 h pour les tâches cochées hors branche récurrente (contrôle au démarrage, puis chaque minute).
@@ -98,6 +98,8 @@ Ouvrir `http://192.168.1.50:3080` sur le téléphone connecté au même réseau.
 
 L'application ne démarre volontairement **pas** si Pocket ID n'est pas joignable ou si les variables OIDC sont incorrectes. Consulter les logs pour identifier l'erreur.
 
+Avec `TEST_LOGIN=1`, le compte de test reçoit automatiquement au premier accès un jeu de données de démonstration : hiérarchie, catégories, récurrence, tâche cochée et liste de cadeaux.
+
 ## 5. Exploitation
 
 ```sh
@@ -123,7 +125,7 @@ Pour restaurer, arrêter l'application, remplacer la base du volume par une sauv
 
 ## Limites assumées
 
-- Pas de tâches partagées entre utilisateurs.
+- Les tâches partagées sont accessibles en lecture et leur état coché peut être modifié par les utilisateurs ayant ouvert un lien actif. Les autres modifications restent réservées au propriétaire.
 - Pas de pièces jointes, notifications, échéances, compte administrateur ou gestion de comptes dans l'app : Pocket ID gère les accès.
 - Glisser-déposer disponible entre tâches sœurs ; les boutons Monter / Descendre restent disponibles dans le détail.
 - Une tâche non récurrente cochée peut être supprimée avec ses descendants après 24 h, sauf si la branche contient une tâche récurrente.

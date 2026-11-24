@@ -25,10 +25,10 @@ function mockApi(context, state) {
     if (shareCreate && request.method() === 'POST') {
       state.snapshot = state.tasks.filter(item => item.id === shareCreate[1] || item.parent_id === shareCreate[1]).map(item => ({ ...item, parent_id: item.id === shareCreate[1] ? null : item.parent_id }));
       state.lastShareOptions = request.postDataJSON();
-      return json(200, { token: 's'.repeat(43), expires_at: state.lastShareOptions.duration_seconds ? Math.floor(Date.now() / 1000) + state.lastShareOptions.duration_seconds : null });
+      return json(200, { token: 's'.repeat(43), expires_at: state.lastShareOptions.duration_seconds ? Math.floor(Date.now() / 1000) + state.lastShareOptions.duration_seconds : null, live: state.lastShareOptions.mode === 'live' });
     }
     if (url.pathname === `/api/shares/${'s'.repeat(43)}`) {
-      if (request.method() === 'GET') return json(200, { tasks: state.snapshot, already_imported: Boolean(state.imports) });
+      if (request.method() === 'GET') return json(200, { tasks: state.snapshot, already_imported: Boolean(state.imports), live: state.lastShareOptions?.mode === 'live' });
       if (request.method() === 'POST') { state.imports = (state.imports || 0) + 1; state.lastDestination = request.postDataJSON(); return json(200, { id: 'copy' }); }
     }
     if (url.pathname === '/api/tasks' && request.method() === 'GET') {
@@ -39,6 +39,13 @@ function mockApi(context, state) {
         const item = { ...task(`new-${state.tasks.length}`, data.title, data.parent_id, data.category), ...data };
       state.tasks.push(item);
       return json(201, { id: item.id });
+    }
+    const check = url.pathname.match(/^\/api\/tasks\/([^/]+)\/check$/);
+    if (check && request.method() === 'POST') {
+      const item = state.tasks.find(item => item.id === check[1]);
+      if (!item) return json(404, { error: 'Tâche introuvable' });
+      item.completed_at = request.postDataJSON().done ? Math.floor(Date.now() / 1000) : null;
+      return json(200, { ok: true });
     }
     const category = url.pathname.match(/^\/api\/tasks\/([^/]+)\/category$/);
     if (category && request.method() === 'PATCH') {
@@ -234,6 +241,7 @@ test('prévisualiser un partage avant de confirmer l’import', async ({ browser
     const sender = await first.newPage(); await sender.goto('http://127.0.0.1:4187/');
     await sender.locator('[data-id="parent"]').getByRole('button', { name: 'Actions' }).click();
     await sender.getByRole('menuitem', { name: 'Partager', exact: true }).click();
+    await sender.getByLabel('Type de partage').selectOption('copy');
     await sender.getByRole('button', { name: 'Créer le lien', exact: true }).click();
     const link = await sender.getByLabel('Lien de partage').inputValue();
     const recipient = await second.newPage(); await recipient.goto(link);
@@ -250,6 +258,37 @@ test('prévisualiser un partage avant de confirmer l’import', async ({ browser
     await dialog.getByLabel('Nom de la nouvelle tâche parente').fill('Projet');
     await dialog.getByRole('button', { name: 'Ajouter à mes tâches' }).click();
     await expect(dialog).toBeHidden(); expect(state.lastDestination).toEqual({ new_parent_title: 'Projet' });
+  } finally { await first.close(); await second.close(); }
+});
+
+test('ouvrir une liste synchronisée sans copie et retrouver les coches dans les deux sessions', async ({ browser }) => {
+  const state = { tasks: [task('parent', 'Cadeaux'), task('child', 'Un livre', 'parent')] };
+  const first = await browser.newContext(), second = await browser.newContext();
+  try {
+    await mockApi(first, state); await mockApi(second, state);
+    const sender = await first.newPage(); await sender.goto('http://127.0.0.1:4187/');
+    await sender.locator('[data-id="parent"] .menu-toggle').click();
+    await sender.getByRole('menuitem', { name: 'Partager', exact: true }).click();
+    await expect(sender.getByLabel('Type de partage')).toHaveValue('live');
+    await sender.getByRole('button', { name: 'Créer le lien', exact: true }).click();
+    const link = await sender.getByLabel('Lien de partage').inputValue();
+    expect(state.lastShareOptions.mode).toBe('live');
+    await sender.getByRole('dialog').getByRole('button', { name: 'Fermer', exact: true }).click();
+    const recipient = await second.newPage(); await recipient.goto(link);
+    const dialog = recipient.getByRole('dialog', { name: 'Liste partagée' });
+    await expect(dialog.getByText('Un livre', { exact: true })).toBeVisible();
+    await expect(dialog.getByLabel('Importer sous')).toHaveCount(0);
+    await dialog.getByRole('button', { name: 'Ouvrir la liste' }).click();
+    await expect(dialog).toBeHidden();
+    await recipient.getByRole('checkbox', { name: 'Terminer Cadeaux', exact: true }).check();
+    await expect(recipient.locator('[data-id="parent"]')).toHaveClass(/done/);
+    await sender.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await expect(sender.getByRole('checkbox', { name: 'Terminer Cadeaux', exact: true })).toBeChecked();
+    await sender.getByRole('checkbox', { name: 'Terminer Cadeaux', exact: true }).uncheck();
+    await expect(sender.locator('[data-id="parent"]')).not.toHaveClass(/done/);
+    await recipient.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await expect(recipient.getByRole('checkbox', { name: 'Terminer Cadeaux', exact: true })).not.toBeChecked();
+    expect(state.imports || 0).toBe(0);
   } finally { await first.close(); await second.close(); }
 });
 
@@ -510,10 +549,10 @@ test('conserver la durée choisie et expliquer un lien expiré sans proposer d�
   await dialog.getByRole('button', { name: 'Créer le lien' }).click();
   await expect(dialog.getByLabel('Lien de partage')).toBeVisible();
   await expect(dialog.locator('.share-expiry')).toContainText('Expire le');
-  expect(state.lastShareOptions).toEqual({ duration_seconds: 604800 });
+  expect(state.lastShareOptions).toEqual({ duration_seconds: 604800, mode: 'live' });
   await page.route('**/api/shares/' + 's'.repeat(43), route => route.fulfill({ status: 404, json: { error: 'Lien de partage expiré ou désactivé' } }));
   await page.goto('/#partage=' + 's'.repeat(43));
-  const preview = page.getByRole('dialog', { name: 'Importer les tâches' });
+  const preview = page.getByRole('dialog', { name: 'Liste partagée' });
   await expect(preview.getByText('Lien de partage expiré ou désactivé')).toBeVisible();
   await expect(preview.getByRole('button', { name: 'Ajouter à mes tâches' })).toHaveCount(0);
 });
